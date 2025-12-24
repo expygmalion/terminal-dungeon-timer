@@ -9,7 +9,23 @@ from datetime import datetime, timedelta
 
 # --- Configuration & Constants ---
 DATA_FILE = "timer_history.json"
+CONFIG_FILE = "timer_config.json"
 PRESETS = [5, 10, 15, 20, 25, 30, 45, 60, 90, 120]
+
+DEFAULT_CONFIG = {
+    "project_tags": {},
+    "classes": [
+        {"name": "Code Wizard", "tags": ["code", "py", "dev", "script", "backend"]},
+        {"name": "Data Ronin", "tags": ["data", "sql", "analysis", "pandas", "ai"]},
+        {"name": "SysAdmin Paladin", "tags": ["sys", "admin", "server", "bash", "deploy", "linux"]},
+        {"name": "Web Weaver", "tags": ["web", "html", "css", "react", "node", "frontend"]},
+        {"name": "QA Paladin", "tags": ["test", "qa", "bug", "fix"]},
+        {"name": "Scholar", "tags": ["study", "read", "learn", "book", "thesis"]},
+        {"name": "Bard", "tags": ["write", "blog", "content", "music", "art"]}
+    ],
+    "xp_goal": 1000,
+    "boss_threshold": 120
+}
 
 BIG_FONT = {
     '0': [r" ######\  ", r"### __##\ ", r"####\ ## |", r"##\##\## |", r"## \#### |", r"## |\### |", r"\######  /", r" \______/ "],
@@ -28,7 +44,7 @@ BIG_FONT = {
 # --- Global State ---
 SESSION = {
     'active': False,
-    'state': 'stopped', # running, paused, finished
+    'state': 'stopped', 
     'project': "",
     'task': "",
     'duration_secs': 0,
@@ -44,6 +60,20 @@ def load_history():
     try:
         with open(DATA_FILE, 'r') as f: return json.load(f)
     except: return []
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE): return DEFAULT_CONFIG.copy()
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            data = json.load(f)
+            # Simple merge to ensure keys exist
+            for k, v in DEFAULT_CONFIG.items():
+                if k not in data: data[k] = v
+            return data
+    except: return DEFAULT_CONFIG.copy()
+
+def save_config(cfg):
+    with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=2)
 
 def get_unique_projects():
     history = load_history()
@@ -67,6 +97,30 @@ def delete_session(index):
         return True
     return False
 
+def determine_class(project_name):
+    cfg = load_config()
+    # 1. Check direct project tags
+    tags = cfg['project_tags'].get(project_name, [])
+    
+    # 2. Add words from project name as implicit tags
+    if project_name:
+        tags.extend(project_name.lower().replace("-", " ").split())
+    
+    # 3. Match against classes
+    best_match = "Novice"
+    max_matches = 0
+    
+    for cls in cfg['classes']:
+        matches = sum(1 for t in cls['tags'] if any(pt in t or t in pt for pt in tags))
+        if matches > max_matches:
+            max_matches = matches
+            best_match = cls['name']
+            
+    if max_matches == 0 and project_name:
+        return f"{project_name} Mancer"
+    
+    return best_match
+
 def format_duration(seconds):
     m = int(seconds // 60); s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
@@ -74,12 +128,9 @@ def format_duration(seconds):
 def parse_time_str(s):
     try:
         parts = s.split(':')
-        if len(parts) == 3: # H:M:S
-            return int(parts[0])*60 + int(parts[1]) + int(parts[2])/60
-        if len(parts) == 2: # M:S
-            return int(parts[0]) + int(parts[1])/60
-        if len(parts) == 1: # MIN
-            return float(parts[0])
+        if len(parts) == 3: return int(parts[0])*60 + int(parts[1]) + int(parts[2])/60
+        if len(parts) == 2: return int(parts[0]) + int(parts[1])/60
+        if len(parts) == 1: return float(parts[0])
     except: pass
     return None
 
@@ -89,38 +140,25 @@ def tick_timer():
     now = time.time()
     elapsed = SESSION['elapsed_before_pause'] + (now - SESSION['start_time'])
     remaining = SESSION['duration_secs'] - elapsed
-    
     if now - SESSION['last_blink'] > 0.5:
         SESSION['show_colon'] = not SESSION['show_colon']
         SESSION['last_blink'] = now
-        
     if remaining <= 0:
-        SESSION['state'] = 'finished'
-        SESSION['show_colon'] = True
-        save_session({
-            "project": SESSION['project'], "task": SESSION['task'],
-            "duration_minutes": SESSION['duration_secs'] // 60,
-            "timestamp": datetime.now().isoformat(), "status": "completed"
-        })
+        SESSION['state'] = 'finished'; SESSION['show_colon'] = True
+        save_session({"project": SESSION['project'], "task": SESSION['task'], "duration_minutes": SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "completed"})
 
 def start_new_session(project, task, duration_mins):
     SESSION['active'] = True; SESSION['state'] = 'running'
     SESSION['project'] = project; SESSION['task'] = task
     SESSION['duration_secs'] = duration_mins * 60
-    SESSION['start_time'] = time.time(); SESSION['elapsed_before_pause'] = 0
-    SESSION['show_colon'] = True
+    SESSION['start_time'] = time.time(); SESSION['elapsed_before_pause'] = 0; SESSION['show_colon'] = True
 
 def abort_session():
     if not SESSION['active']: return
     elapsed = SESSION['elapsed_before_pause']
     if SESSION['state'] == 'running': elapsed += (time.time() - SESSION['start_time'])
     if SESSION['state'] != 'finished':
-        save_session({
-            "project": SESSION['project'], "task": SESSION['task'],
-            "duration_minutes": SESSION['duration_secs'] // 60,
-            "timestamp": datetime.now().isoformat(), "status": "aborted",
-            "actual_duration_seconds": int(elapsed)
-        })
+        save_session({"project": SESSION['project'], "task": SESSION['task'], "duration_minutes": SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "aborted", "actual_duration_seconds": int(elapsed)})
     SESSION['active'] = False; SESSION['state'] = 'stopped'
 
 # --- TUI Helpers ---
@@ -153,8 +191,7 @@ def safe_addstr(stdscr, y, x, text, attr=0):
 
 def draw_pip_timer(stdscr):
     if not SESSION['active']: return
-    h, w = stdscr.getmaxyx()
-    pip_w = 24; pip_h = 3; start_x = w - pip_w - 1; start_y = 0
+    h, w = stdscr.getmaxyx(); pip_w = 24; start_x = w - pip_w - 1
     if SESSION['state'] == 'running': elapsed = SESSION['elapsed_before_pause'] + (time.time() - SESSION['start_time'])
     else: elapsed = SESSION['elapsed_before_pause']
     rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
@@ -163,12 +200,12 @@ def draw_pip_timer(stdscr):
     elif SESSION['state'] == 'finished': color = curses.color_pair(2)
     try:
         stdscr.attron(color)
-        stdscr.addstr(start_y, start_x, "╭" + "─"*(pip_w-2) + "╮")
-        stdscr.addstr(start_y+1, start_x, "│" + " "*(pip_w-2) + "│")
-        stdscr.addstr(start_y+2, start_x, "╰" + "─"*(pip_w-2) + "╯")
+        stdscr.addstr(0, start_x, "╭" + "─"*(pip_w-2) + "╮")
+        stdscr.addstr(1, start_x, "│" + " "*(pip_w-2) + "│")
+        stdscr.addstr(2, start_x, "╰" + "─"*(pip_w-2) + "╯")
         icon = "▶" if SESSION['state']=='running' else ("⏸" if SESSION['state']=='paused' else "✔")
         txt = f"{icon} {t_str} [T]"
-        stdscr.addstr(start_y+1, start_x + (pip_w-len(txt))//2, txt)
+        stdscr.addstr(1, start_x + (pip_w-len(txt))//2, txt)
         stdscr.attroff(color)
     except: pass
 
@@ -177,12 +214,27 @@ def check_nav_keys(key):
     if key in [ord('w'), ord('W')]: return 'WEEKLY'
     if key in [ord('r'), ord('R')]: return 'RAID'
     if key in [ord('i'), ord('I')]: return 'INFO'
+    if key in [ord('s'), ord('S')]: return 'SETTINGS'
     if key in [ord('t'), ord('T')] and SESSION['active']: return 'TIMER'
     return None
 
 def is_subsequence(q, t):
     it = iter(t.lower()); q = q.lower().replace(" ", "")
     return all(c in it for c in q)
+
+def text_input(stdscr, y, x, prompt, default=""):
+    curses.curs_set(1); inp = default
+    while True:
+        tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
+        draw_box(stdscr, y, x, 3, 40, prompt)
+        safe_addstr(stdscr, y+1, x+2, inp)
+        stdscr.refresh()
+        stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
+        if k == -1: time.sleep(0.05); continue
+        if k in [10, 13]: curses.curs_set(0); return inp
+        elif k == 27: curses.curs_set(0); return None
+        elif k in [curses.KEY_BACKSPACE, 127, 8]: inp = inp[:-1]
+        elif 32 <= k <= 126 and len(inp) < 36: inp += chr(k)
 
 def fuzzy_select(stdscr, y, x, prompt, options):
     curses.curs_set(1); inp = ""; sel = 0
@@ -210,104 +262,104 @@ def fuzzy_select(stdscr, y, x, prompt, options):
         elif 32 <= k <= 126 and len(inp) < 30: inp += chr(k); sel = 0
 
 def select_duration(stdscr):
-
     h, w = stdscr.getmaxyx(); opts = PRESETS + ["Custom"]; sel = 0
-
     custom_inp = ""; mode = "MENU"
-
     while True:
-
         tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
-
-        
-
         top_h = 5; btm_h = len(opts) + 4; total_h = top_h + btm_h
-
         sy = max(0, (h - total_h) // 2)
-
-        
-
         draw_box(stdscr, sy, w//2 - 20, top_h, 40, "QUICK ENTRY")
-
         safe_addstr(stdscr, sy + 1, w//2 - 18, "H:M:S or MIN:", curses.color_pair(2))
-
         dsp = custom_inp if custom_inp else "00:00:00"
-
         safe_addstr(stdscr, sy + 2, w//2 - 18, f" {dsp:<15} ", curses.A_REVERSE if mode=="TYPE" else curses.A_DIM)
-
-        
-
         by = sy + top_h
-
         if by + btm_h < h:
-
             draw_box(stdscr, by, w//2 - 20, btm_h, 40, "PRESETS")
-
             for i, item in enumerate(opts):
-
                 lbl = "Manual Input" if item=="Custom" else f"{item} Minutes"
-
                 attr = curses.A_REVERSE if (i==sel and mode=="MENU") else 0
-
-                safe_addstr(stdscr, by + 2 + i, w//2 - 15, f"{' > ' if (i==sel and mode=='MENU') else '   '}{lbl:<20}", attr)
-
-        else:
-
-            # Fallback if screen too small: just draw list
-
-            safe_addstr(stdscr, by, w//2 - 20, "Screen too small for presets", curses.color_pair(9))
-
-            
-
+                safe_addstr(stdscr, by + 2 + i, w//2 - 15, f"{ ' > ' if (i==sel and mode=='MENU') else '   '}{lbl:<20}", attr)
+        else: safe_addstr(stdscr, by, w//2 - 20, "Screen too small for presets", curses.color_pair(9))
         stdscr.addstr(h - 2, 2, "[Arrows/Digits] Nav/Type  [Enter] Start", curses.color_pair(4)); stdscr.refresh()
-
         stdscr.timeout(50); k = stdscr.getch()
-
-        
-
         if k == -1: continue
-
         if mode == "MENU":
-
             if k == curses.KEY_UP:
-
                 if sel == 0: mode = "TYPE"
-
                 else: sel -= 1
-
             elif k == curses.KEY_DOWN: sel = min(len(opts)-1, sel + 1)
-
             elif k in [10, 13]:
-
                 if opts[sel] == "Custom": mode = "TYPE"
-
                 else: return opts[sel]
-
             elif 48 <= k <= 57: mode = "TYPE"; custom_inp = chr(k)
-
             elif k == 27: return None
-
         else:
-
             if k in [10, 13]:
-
-                val = parse_time_str(custom_inp)
-
+                val = parse_time_str(custom_inp); 
                 if val: return val
-
             elif k == 27: mode = "MENU"; custom_inp = ""
-
             elif k in [127, 8, curses.KEY_BACKSPACE]:
-
                 custom_inp = custom_inp[:-1]
-
                 if not custom_inp: mode = "MENU"
-
             elif (48 <= k <= 57 or k == ord(':')) and len(custom_inp) < 10: custom_inp += chr(k)
-
             elif k == curses.KEY_DOWN: mode = "MENU"; sel = 0
 
-# --- Main Views ---
+# --- Screens ---
+
+def show_settings(stdscr):
+    cfg = load_config(); opts = ["Manage Project Tags", "Manage Classes", "Save & Return"]
+    sel = 0
+    while True:
+        tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
+        draw_box(stdscr, h//2 - 6, w//2 - 20, 12, 40, "SETTINGS")
+        for i, opt in enumerate(opts):
+            attr = curses.A_REVERSE if i == sel else 0
+            safe_addstr(stdscr, h//2 - 4 + (i*2), w//2 - 15, f"{opt:<30}", attr)
+        stdscr.refresh(); stdscr.timeout(50); k = stdscr.getch()
+        if k == -1: continue
+        if k == curses.KEY_UP: sel = max(0, sel-1)
+        elif k == curses.KEY_DOWN: sel = min(len(opts)-1, sel+1)
+        elif k in [10, 13]:
+            if sel == 0: # Manage Projects
+                projs = get_unique_projects()
+                p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT PROJECT", projs)
+                if p:
+                    curr_tags = cfg['project_tags'].get(p, [])
+                    val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
+                    if val is not None:
+                        cfg['project_tags'][p] = [t.strip() for t in val.split(',') if t.strip()]
+            elif sel == 1: # Manage Classes
+                cls_names = [c['name'] for c in cfg['classes']] + ["+ ADD NEW CLASS"]
+                c = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT CLASS", cls_names)
+                if c == "+ ADD NEW CLASS":
+                    name = text_input(stdscr, h//2, w//2 - 20, "NEW CLASS NAME:")
+                    if name:
+                        tags = text_input(stdscr, h//2 + 4, w//2 - 20, "KEYWORDS (comma sep):")
+                        if tags:
+                            cfg['classes'].append({"name": name, "tags": [t.strip() for t in tags.split(',') if t.strip()]})
+                elif c:
+                    cls = next((x for x in cfg['classes'] if x['name'] == c), None)
+                    if cls:
+                        act = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {c}", ["Edit Name", "Edit Tags", "Delete Class", "Cancel"])
+                        if act == "Edit Name":
+                            new_name = text_input(stdscr, h//2, w//2 - 20, "NEW NAME:", cls['name'])
+                            if new_name: cls['name'] = new_name
+                        elif act == "Edit Tags":
+                            tags = text_input(stdscr, h//2, w//2 - 20, "TAGS (comma sep):", ",".join(cls['tags']))
+                            if tags is not None: cls['tags'] = [t.strip() for t in tags.split(',') if t.strip()]
+                        elif act == "Delete Class":
+                            msg = f" DELETE CLASS '{c}'? (y/n) "
+                            safe_addstr(stdscr, h-1, 2, " " * (w-3))
+                            safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
+                            stdscr.refresh()
+                            stdscr.timeout(-1)
+                            if stdscr.getch() in [ord('y'), ord('Y')]:
+                                cfg['classes'].remove(cls)
+                            stdscr.timeout(50)
+            elif sel == 2:
+                save_config(cfg)
+                return 'HISTORY'
+        elif k == 27: return 'HISTORY'
 
 def show_history(stdscr):
     idx = 0; scroll = 0; use_nerd = "--nerd-fonts" in sys.argv
@@ -320,12 +372,13 @@ def show_history(stdscr):
         r_str = f"{ratio:.2f}x" if ratio != float('inf') else "INF"
         safe_addstr(stdscr, 0, 2, f"TODAY: {tt:.1f}m | YEST: {ty:.1f}m | RATIO: {r_str}", curses.color_pair(2)|curses.A_BOLD)
         if use_nerd:
-            header = f"{' DATE':<19} | {' PROJ':<12} | {' TASK':<20} | {' DUR':<5} | {' STATUS':<12} | {' MULT'}"
+            header = f"{ ' DATE':<19} | { ' PROJ':<12} | { ' TASK':<20} | { ' DUR':<5} | { ' STATUS':<12} | {' MULT'}"
         else:
-            header = f"{'DATE':<19} | {'PROJECT':<12} | {'TASK':<20} | {'DUR':<5} | {'STATUS':<12} | {'MULT'}"
+            header = f"{ 'DATE':<19} | {'PROJECT':<12} | {'TASK':<20} | {'DUR':<5} | {'STATUS':<12} | {'MULT'}"
         safe_addstr(stdscr, 2, 2, header, curses.color_pair(3)); safe_addstr(stdscr, 3, 2, "-"*min(len(header), w-2), curses.color_pair(3))
         list_h = max(1, h - 6)
-        if history: idx = max(0, min(idx, len(history)-1))
+        if not history: idx = 0
+        else: idx = max(0, min(idx, len(history) - 1))
         if idx < scroll: scroll = idx
         elif idx >= scroll + list_h: scroll = idx - list_h + 1
         for i in range(list_h):
@@ -336,14 +389,13 @@ def show_history(stdscr):
             if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
             attr = curses.color_pair(1)|curses.A_REVERSE if ii==idx else 0
             safe_addstr(stdscr, 4+i, 2, f"{dt:<19} | {it.get('project','-')[:12]:<12} | {it.get('task','-')[:20]:<20} | {dm:<5} | {st:<12} | {'1.0x' if st.endswith('SUCCESS') else '-'}", attr)
-        safe_addstr(stdscr, h-1, 2, "[N] New  [D] Del  [H] Heat  [W] Week  [R] Raid  [I] Info  [Q] Quit", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, "[N] New  [D] Del  [H] Heat  [W] Week  [R] Raid  [S] Set  [I] Info  [Q] Quit", curses.color_pair(4))
         draw_pip_timer(stdscr); stdscr.refresh(); k = stdscr.getch()
         if k == -1: continue
         nav = check_nav_keys(k); 
         if nav: return nav
         if k in [ord('n'), ord('N')]: return 'NEW'
         elif k in [ord('d'), ord('D')] and history: 
-            # Confirmation prompt
             msg = " DELETE SESSION? (y/n) "
             safe_addstr(stdscr, h-1, 2, " " * (w-3))
             safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
@@ -411,7 +463,7 @@ def show_yearly_heatmap(stdscr):
         except: pass
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
-        safe_addstr(stdscr, 1, 4, f"{total_c} contributions in the last year", curses.color_pair(1)|curses.A_BOLD)
+        safe_addstr(stdscr, 1, 4, f"{total_c} contributions to the guild in the last year", curses.color_pair(1)|curses.A_BOLD)
         m_str = "    "; curr_m = -1
         for wk in range(53):
              d = sy + timedelta(weeks=wk)
@@ -465,12 +517,11 @@ def show_weekly_dungeon(stdscr):
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
         draw_box(stdscr, 1, 0, 5, w, "PLAYER HUD")
+        
+        # Calculate Class
         top_p = max(proj_xp, key=proj_xp.get) if proj_xp else "Novice"
-        if "code" in top_p.lower() or "py" in top_p.lower(): p_class = "Code Wizard"
-        elif "data" in top_p.lower(): p_class = "Data Ronin"
-        elif "sys" in top_p.lower(): p_class = "SysAdmin Paladin"
-        elif "web" in top_p.lower(): p_class = "Web Weaver"
-        else: p_class = f"{top_p} Mancer"
+        p_class = determine_class(top_p)
+        
         safe_addstr(stdscr, 2, 2, f"CLASS: {p_class}", curses.color_pair(8)|curses.A_BOLD)
         xp_p = min(1.0, wk_total/1000); b_l = max(10, w - 40); fld = int(b_l * xp_p)
         safe_addstr(stdscr, 3, 2, f"LVL {int(wk_total/60)} ([{'█'*fld + '░'*(b_l-fld)}]) {int(wk_total)}/1000 XP")
@@ -565,28 +616,24 @@ def show_info_screen(stdscr):
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
         draw_box(stdscr, 1, 2, h-2, w-4, "ADVENTURER'S MANUAL")
-        
         y = 3; x = 5
         if y < h-2: safe_addstr(stdscr, y, x, "1. THE GOAL: FILL THE BAR", curses.color_pair(12)|curses.A_BOLD)
         if y+1 < h-2: safe_addstr(stdscr, y+1, x, "   1 Min = 1 XP. Weekly Goal: 1000 XP.", curses.color_pair(1))
-        if y+2 < h-2: safe_addstr(stdscr, y+2, x+3, f"LVL 5 [{'█'*10 + '░'*10}]", curses.color_pair(7))
-        
+        if y+2 < h-2: safe_addstr(stdscr, y+2, x+3, f"LVL 5 ([{'█'*10 + '░'*10}])", curses.color_pair(7))
         y += 5
         if y < h-2: safe_addstr(stdscr, y, x, "2. COMBAT: BUILD THE PILLARS", curses.color_pair(9)|curses.A_BOLD)
         if y+1 < h-2: safe_addstr(stdscr, y+1, x, "   Taller bars = More work done today.", curses.color_pair(1))
-        if y+2 < h-2: safe_addstr(stdscr, y+2, x+3, "█  (Crit!)  ♛ > 2 Hrs", curses.color_pair(7)|curses.A_BOLD)
+        if y+2 < h-2: safe_addstr(stdscr, y+2, x+3, "█  (Crit!)  ♛ > 2Hrs", curses.color_pair(7)|curses.A_BOLD)
         if y+3 < h-2: safe_addstr(stdscr, y+3, x+3, "▓  (High)", curses.color_pair(8))
         if y+4 < h-2: safe_addstr(stdscr, y+4, x+3, "▒  (Med)", curses.color_pair(8)|curses.A_DIM)
-        
         y += 6
         if y < h-2: safe_addstr(stdscr, y, x, "3. CONTROLS", curses.color_pair(11)|curses.A_BOLD)
-        keys = [("[N]","New"), ("[T]","Timer"), ("[H]","Heatmap"), ("[W]","Dungeon"), ("[R]","Raid"), ("[D]","Delete")]
+        keys = [("[N]","New"), ("[T]","Timer"), ("[H]","Heatmap"), ("[W]","Dungeon"), ("[R]","Raid"), ("[D]","Delete"), ("[S]","Settings")]
         for i, (k, desc) in enumerate(keys):
             if y+1+(i//2) < h-2: 
                 col = 3 if i%2==0 else 25
                 row = y+1+(i//2)
                 safe_addstr(stdscr, row, x+col, f"{k} {desc}", curses.color_pair(1))
-
         safe_addstr(stdscr, h-3, w//2 - 10, "Press any key to return", curses.color_pair(9)|curses.A_BOLD)
         stdscr.refresh(); stdscr.timeout(50); k = stdscr.getch()
         if k == -1: continue
@@ -615,6 +662,7 @@ def main(stdscr):
         elif view == 'WEEKLY': view = show_weekly_dungeon(stdscr)
         elif view == 'RAID': view = show_daily_raid(stdscr)
         elif view == 'INFO': view = show_info_screen(stdscr)
+        elif view == 'SETTINGS': view = show_settings(stdscr)
         elif view == 'NEW':
             stdscr.erase(); h, w = stdscr.getmaxyx()
             p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects())
