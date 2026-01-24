@@ -707,21 +707,33 @@ def show_info_screen(stdscr):
 
 def add_new_todo_dialog(stdscr):
     h, w = stdscr.getmaxyx()
-    content = text_input(stdscr, h//2 - 6, w//2 - 20, "TASK CONTENT:")
-    if not content: return
+    content = text_input(stdscr, h//2 - 6, w//2 - 20, "TASK CONTENT (ESC to Cancel):")
+    if content is None: return
+    if not content.strip(): return
     
     today = datetime.now().strftime("%Y-%m-%d")
-    d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "DATE (YYYY-MM-DD):", today)
+    d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "DATE (ESC to Cancel):", today)
+    if d_str is None: return
     if not d_str: d_str = today
     
     projs = ["General"] + get_unique_projects()
-    p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "PROJECT (ESC=General)", projs)
-    if not p: p = "General"
+    p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "PROJECT (ESC to Cancel)", projs)
+    if p is None: return
     
-    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TAGS (comma sep):")
+    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TAGS (ESC to Cancel):")
+    if tags_str is None: return
     tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
     
-    add_todo(content, d_str, p, tags)
+    # Confirmation
+    msg = " SAVE TASK? (y/n) "
+    safe_addstr(stdscr, h-1, 2, " " * (w-3))
+    safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
+    stdscr.refresh()
+    stdscr.timeout(-1)
+    k = stdscr.getch()
+    stdscr.timeout(50)
+    if k in [ord('y'), ord('Y')]:
+        add_todo(content, d_str, p, tags)
 
 def show_todo_list(stdscr):
     mode = 'DAILY'
