@@ -6,9 +6,11 @@ import os
 import sys
 import curses.ascii
 from datetime import datetime, timedelta
+import uuid
 
 # --- Configuration & Constants ---
 DATA_FILE = "timer_history.json"
+TODO_FILE = "todo_data.json"
 CONFIG_FILE = "timer_config.json"
 PRESETS = [5, 10, 15, 20, 25, 30, 45, 60, 90, 120]
 
@@ -55,6 +57,56 @@ SESSION = {
 }
 
 # --- Data Management ---
+def load_todos():
+    if not os.path.exists(TODO_FILE): return []
+    try:
+        with open(TODO_FILE, 'r') as f: return json.load(f)
+    except: return []
+
+def save_todos(todos):
+    with open(TODO_FILE, 'w') as f: json.dump(todos, f, indent=2)
+
+def add_todo(content, date_str, project, tags):
+    todos = load_todos()
+    new_todo = {
+        "id": str(uuid.uuid4()),
+        "content": content,
+        "date": date_str,
+        "project": project if project else "General",
+        "tags": tags,
+        "status": "pending",
+        "timestamp": datetime.now().isoformat()
+    }
+    todos.append(new_todo)
+    save_todos(todos)
+    
+    if project and project != "General" and tags:
+        cfg = load_config()
+        if project not in cfg['project_tags']:
+            cfg['project_tags'][project] = []
+        
+        changed = False
+        for t in tags:
+            if t not in cfg['project_tags'][project]:
+                cfg['project_tags'][project].append(t)
+                changed = True
+        
+        if changed:
+            save_config(cfg)
+
+def toggle_todo(todo_id):
+    todos = load_todos()
+    for t in todos:
+        if t['id'] == todo_id:
+            t['status'] = 'done' if t['status'] == 'pending' else 'pending'
+            break
+    save_todos(todos)
+
+def delete_todo(todo_id):
+    todos = load_todos()
+    todos = [t for t in todos if t['id'] != todo_id]
+    save_todos(todos)
+
 def load_history():
     if not os.path.exists(DATA_FILE): return []
     try:
@@ -153,13 +205,23 @@ def start_new_session(project, task, duration_mins):
     SESSION['duration_secs'] = duration_mins * 60
     SESSION['start_time'] = time.time(); SESSION['elapsed_before_pause'] = 0; SESSION['show_colon'] = True
 
-def abort_session():
+def terminate_session():
     if not SESSION['active']: return
     elapsed = SESSION['elapsed_before_pause']
     if SESSION['state'] == 'running': elapsed += (time.time() - SESSION['start_time'])
     if SESSION['state'] != 'finished':
-        save_session({"project": SESSION['project'], "task": SESSION['task'], "duration_minutes": SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "aborted", "actual_duration_seconds": int(elapsed)})
+        save_session({"project": SESSION['project'], "task": SESSION['task'], "duration_minutes": SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "terminated", "actual_duration_seconds": int(elapsed)})
     SESSION['active'] = False; SESSION['state'] = 'stopped'
+
+def pause_timer():
+    if SESSION['state'] == 'running':
+        SESSION['state'] = 'paused'
+        SESSION['elapsed_before_pause'] += (time.time() - SESSION['start_time'])
+
+def resume_timer():
+    if SESSION['state'] == 'paused':
+        SESSION['state'] = 'running'
+        SESSION['start_time'] = time.time()
 
 # --- TUI Helpers ---
 def draw_box(stdscr, y, x, height, width, title=""):
@@ -216,6 +278,7 @@ def check_nav_keys(key):
     if key in [ord('i'), ord('I')]: return 'INFO'
     if key in [ord('s'), ord('S')]: return 'SETTINGS'
     if key in [ord('t'), ord('T')] and SESSION['active']: return 'TIMER'
+    if key in [ord('l'), ord('L')]: return 'TODO'
     return None
 
 def is_subsequence(q, t):
@@ -430,7 +493,7 @@ def show_timer_view(stdscr):
             fld = int(bar_w * pct)
             safe_addstr(stdscr, bar_y, w//2 - bar_w//2, "█"*fld + "░"*(bar_w-fld), curses.color_pair(3))
         safe_addstr(stdscr, bar_y+3, w//2 - 10, f"STATUS: {SESSION['state'].upper()}", color|curses.A_BOLD)
-        btns = ["MENU", "RESTART", "QUIT"] if SESSION['state']=='finished' else ["PAUSE" if SESSION['state']=='running' else "START", "RESTART", "BACK", "QUIT"]
+        btns = ["MENU", "RESTART", "QUIT"] if SESSION['state']=='finished' else ["PAUSE" if SESSION['state']=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
         t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = w//2 - t_w//2
         for i, lbl in enumerate(btns):
             safe_addstr(stdscr, h-4, x, f"[ {lbl} ]", curses.color_pair(1)|(curses.A_REVERSE if i==btn else 0)); x += len(lbl)+6
@@ -443,10 +506,11 @@ def show_timer_view(stdscr):
         elif k in [10, 13]:
             sel = btns[btn]
             if sel in ["BACK", "MENU"]: return 'HISTORY'
-            elif sel == "QUIT": abort_session(); return 'QUIT'
-            elif sel == "RESTART": abort_session(); start_new_session(SESSION['project'], SESSION['task'], SESSION['duration_secs']//60); return 'TIMER'
-            elif sel == "START": SESSION['state']='running'; SESSION['start_time']=time.time()
-            elif sel == "PAUSE": SESSION['state']='paused'; SESSION['elapsed_before_pause']+= (time.time()-SESSION['start_time'])
+            elif sel == "QUIT": terminate_session(); return 'QUIT'
+            elif sel == "STOP": terminate_session(); return 'HISTORY'
+            elif sel == "RESTART": terminate_session(); start_new_session(SESSION['project'], SESSION['task'], SESSION['duration_secs']//60); return 'TIMER'
+            elif sel == "RESUME": resume_timer()
+            elif sel == "PAUSE": pause_timer()
         elif k == 27: return 'HISTORY'
 
 def show_yearly_heatmap(stdscr):
@@ -641,6 +705,135 @@ def show_info_screen(stdscr):
         if nav and nav != 'INFO': return nav
         return 'HISTORY'
 
+def add_new_todo_dialog(stdscr):
+    h, w = stdscr.getmaxyx()
+    content = text_input(stdscr, h//2 - 6, w//2 - 20, "TASK CONTENT:")
+    if not content: return
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "DATE (YYYY-MM-DD):", today)
+    if not d_str: d_str = today
+    
+    projs = ["General"] + get_unique_projects()
+    p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "PROJECT (ESC=General)", projs)
+    if not p: p = "General"
+    
+    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TAGS (comma sep):")
+    tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
+    
+    add_todo(content, d_str, p, tags)
+
+def show_todo_list(stdscr):
+    mode = 'DAILY'
+    expanded = set()
+    sel_idx = 0
+    scroll_idx = 0
+    
+    while True:
+        tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
+        todos = load_todos()
+        
+        tree = []
+        if mode == 'DAILY':
+            groups = {}
+            for t in todos:
+                d = t.get('date', 'Unknown')
+                if d not in groups: groups[d] = []
+                groups[d].append(t)
+            sorted_keys = sorted(groups.keys(), reverse=True)
+            for k in sorted_keys:
+                items = groups[k]
+                done_c = sum(1 for i in items if i['status']=='done')
+                tree.append({'type': 'group', 'key': k, 'items': items, 'done': done_c, 'total': len(items)})
+                if k in expanded:
+                    for item in items:
+                        tree.append({'type': 'item', 'data': item, 'parent': k})
+        else:
+            groups = {}
+            for t in todos:
+                p = t.get('project', 'General')
+                if not p: p = "General"
+                if p not in groups: groups[p] = []
+                groups[p].append(t)
+            sorted_keys = sorted(groups.keys(), key=lambda x: (0 if x=='General' else 1, x))
+            for k in sorted_keys:
+                items = sorted(groups[k], key=lambda x: x.get('date', ''))
+                done_c = sum(1 for i in items if i['status']=='done')
+                tree.append({'type': 'group', 'key': k, 'items': items, 'done': done_c, 'total': len(items)})
+                if k in expanded:
+                    for item in items:
+                        tree.append({'type': 'item', 'data': item, 'parent': k})
+                        
+        tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
+        tabs += f" [PROJECT] " if mode=='PROJECT' else "  PROJECT  "
+        safe_addstr(stdscr, 1, 2, tabs, curses.color_pair(3)|curses.A_BOLD)
+        safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(3))
+        
+        list_h = h - 5
+        if not tree: sel_idx = 0
+        else: sel_idx = max(0, min(sel_idx, len(tree)-1))
+        
+        if sel_idx < scroll_idx: scroll_idx = sel_idx
+        elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
+        
+        for i in range(list_h):
+            ii = scroll_idx + i
+            if ii >= len(tree): break
+            node = tree[ii]
+            is_sel = (ii == sel_idx)
+            attr = curses.A_REVERSE if is_sel else 0
+            
+            if node['type'] == 'group':
+                k = node['key']
+                if mode == 'DAILY':
+                    try:
+                        dt = datetime.strptime(k, "%Y-%m-%d")
+                        lbl = dt.strftime("%d/%b/%Y").upper()
+                    except: lbl = k
+                else: lbl = k
+                
+                pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+                icon = "[-]" if k in expanded else "[+]"
+                safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<20} {pct:>3}% DONE ({node['done']}/{node['total']})", attr|curses.color_pair(4))
+            else:
+                item = node['data']
+                st = "[x]" if item['status']=='done' else "[ ]"
+                col = curses.color_pair(2) if item['status']=='done' else 0
+                tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
+                safe_addstr(stdscr, 4+i, 4, f"  {st} {item['content']}{tags}", attr|col)
+        
+        safe_addstr(stdscr, h-1, 2, "[TAB] Switch View  [N] New  [Enter] Toggle  [D] Delete  [ESC] Back", curses.color_pair(4))
+        stdscr.refresh()
+        stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
+        
+        if k == -1: time.sleep(0.05); continue
+        
+        nav = check_nav_keys(k)
+        if nav and nav != 'TODO': return nav
+        
+        if k == 9:
+            mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
+            expanded = set()
+            sel_idx = 0; scroll_idx = 0
+        elif k in [curses.KEY_DOWN, ord('j')]: sel_idx += 1
+        elif k in [curses.KEY_UP, ord('k')]: sel_idx -= 1
+        elif k in [10, 13]:
+            if tree:
+                node = tree[sel_idx]
+                if node['type'] == 'group':
+                    if node['key'] in expanded: expanded.remove(node['key'])
+                    else: expanded.add(node['key'])
+                else:
+                    toggle_todo(node['data']['id'])
+        elif k in [ord('n'), ord('N')]:
+            add_new_todo_dialog(stdscr)
+        elif k in [ord('d'), ord('D')]:
+            if tree:
+                node = tree[sel_idx]
+                if node['type'] == 'item':
+                    delete_todo(node['data']['id'])
+        elif k == 27: return 'HISTORY'
+
 def calculate_stats():
     history = load_history(); today = datetime.now().date(); yest = today - timedelta(days=1); tt = 0; ty = 0
     for i in history:
@@ -663,6 +856,7 @@ def main(stdscr):
         elif view == 'RAID': view = show_daily_raid(stdscr)
         elif view == 'INFO': view = show_info_screen(stdscr)
         elif view == 'SETTINGS': view = show_settings(stdscr)
+        elif view == 'TODO': view = show_todo_list(stdscr)
         elif view == 'NEW':
             stdscr.erase(); h, w = stdscr.getmaxyx()
             p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects())
@@ -673,7 +867,7 @@ def main(stdscr):
             if not d: view = 'HISTORY'; continue
             start_new_session(p, t, d); view = 'TIMER'
         elif view == 'QUIT':
-            if SESSION['active']: abort_session()
+            if SESSION['active']: terminate_session()
             break
 
 if __name__ == "__main__":
