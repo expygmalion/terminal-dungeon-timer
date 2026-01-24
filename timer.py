@@ -1049,7 +1049,7 @@ def show_todo_list(stdscr):
                         if d_key in expanded:
                             for i_t, item in enumerate(d_items):
                                 is_last_item = (i_t == len(d_items) - 1)
-                                tree.append({'type': 'item', 'data': item, 'parent': d_key, 'is_last': is_last_item})
+                                tree.append({'type': 'item', 'data': item, 'parent': d_key, 'is_last': is_last_item, 'parent_last': is_last_date})
 
         # Tabs Header
         tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
@@ -1153,21 +1153,40 @@ def show_todo_list(stdscr):
                     try: tree_col = curses.color_pair(col_id)
                     except: tree_col = curses.color_pair(3)
                     
-                    # Indentation for items under Date
-                    # Date is at x=6 (label), tree line ends at 6.
-                    # Items should be indented further.
-                    # Visual:
-                    #   └─ DATE
-                    #      └─ [ ] Item
+                    # Vertical connector from Date down to this task?
+                    # No, we need vertical from Project down to next Date group.
+                    # If the parent DATE group is NOT the last one, we need a vertical bar |
+                    # passing through.
                     
-                    indent = 9
-                    line_char = "     ├─" if not node.get('is_last') else "     └─"
+                    # "     " for spacing under Project
+                    # "  |  " if parent (date) is not last? NO.
+                    # Parent is Project. Date is child. Task is Grandchild.
+                    # Project
+                    #   ├─ Date 1
+                    #   │   └─ Task
+                    #   └─ Date 2
+                    
+                    # If this task belongs to Date 1, and Date 1 is NOT last, 
+                    # we need a vertical bar at x=2 connecting Date 1 to Date 2.
+                    
+                    # Prefix Construction:
+                    # Col 0-1: "  "
+                    # Col 2: "│" if Date group (parent) is NOT last, else " "
+                    # Col 3-4: "  "
+                    # Col 5-6: "├─" or "└─"
+                    
+                    v_bar = "│" if not node.get('parent_last') else " "
+                    branch = "├" if not node.get('is_last') else "└"
+                    h_line = "─"
                     
                     # Dashed line for pending items
                     if item['status'] == 'pending':
-                         line_char = "     ├╌" if not node.get('is_last') else "     └╌"
+                         h_line = "╌"
                     
-                    safe_addstr(stdscr, 4+i, 2, line_char, tree_col)
+                    line_str = f"  {v_bar}  {branch}{h_line}"
+                    
+                    safe_addstr(stdscr, 4+i, 2, line_str, tree_col)
+                    indent = 9
                     prefix = ""
                 
                 safe_addstr(stdscr, 4+i, indent, f"{prefix}{st} {item['content']}{tags}", attr|col)
