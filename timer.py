@@ -863,17 +863,18 @@ def show_backlog_view(stdscr):
         todos = load_todos()
         today_str = datetime.now().strftime("%Y-%m-%d")
         
-        # Filter for past items only
-        past_todos = [t for t in todos if t.get('date', '9999-99-99') < today_str]
+        # Filter for Past AND Today items (Review Mode)
+        # Include items <= today
+        backlog_todos = [t for t in todos if t.get('date', '9999-99-99') <= today_str]
         
         tree = []
         groups = {}
-        for t in past_todos:
+        for t in backlog_todos:
             d = t.get('date', 'Unknown')
             if d not in groups: groups[d] = []
             groups[d].append(t)
         
-        # Sort by date descending (newest backlog first)
+        # Sort by date descending (Newest first)
         sorted_keys = sorted(groups.keys(), reverse=True)
         
         # Build flattened tree
@@ -895,7 +896,7 @@ def show_backlog_view(stdscr):
                 curr_row += 1
         
         # Header
-        safe_addstr(stdscr, 1, 2, "  BACKLOG REVIEW  ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+        safe_addstr(stdscr, 1, 2, "  TASK REVIEW (Past + Today)  ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
         safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(5))
         
         list_h = h - 5
@@ -917,7 +918,7 @@ def show_backlog_view(stdscr):
         
         # Render
         if not tree:
-            safe_addstr(stdscr, 4, 4, "No backlog items found!", curses.A_DIM)
+            safe_addstr(stdscr, 4, 4, "No items found for review!", curses.A_DIM)
         else:
             for i in range(list_h):
                 ii = scroll_idx + i
@@ -930,6 +931,7 @@ def show_backlog_view(stdscr):
                     try:
                         dt = datetime.strptime(k, "%Y-%m-%d")
                         lbl = dt.strftime("%a %d/%b/%Y").upper()
+                        if k == today_str: lbl = f"★ {lbl}"
                     except: lbl = k
                     pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
                     safe_addstr(stdscr, 4+i, 2, f"[-] {lbl:<20} {pct:>3}% DONE", curses.color_pair(4)|curses.A_BOLD)
