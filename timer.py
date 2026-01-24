@@ -452,7 +452,7 @@ def show_history(stdscr):
             if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
             attr = curses.color_pair(1)|curses.A_REVERSE if ii==idx else 0
             safe_addstr(stdscr, 4+i, 2, f"{dt:<19} | {it.get('project','-')[:12]:<12} | {it.get('task','-')[:20]:<20} | {dm:<5} | {st:<12} | {'1.0x' if st.endswith('SUCCESS') else '-'}", attr)
-        safe_addstr(stdscr, h-1, 2, "[N] New  [D] Del  [H] Heat  [W] Week  [R] Raid  [S] Set  [I] Info  [Q] Quit", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, "[N] New  [L] Todo  [D] Del  [H] Heat  [W] Week  [R] Raid  [S] Set  [I] Info  [Q] Quit", curses.color_pair(4))
         draw_pip_timer(stdscr); stdscr.refresh(); k = stdscr.getch()
         if k == -1: continue
         nav = check_nav_keys(k); 
@@ -548,7 +548,7 @@ def show_yearly_heatmap(stdscr):
                 if curses.can_change_color(): attr = curses.color_pair(20) if val==0 else (curses.color_pair(21) if val<=15 else (curses.color_pair(22) if val<=30 else (curses.color_pair(23) if val<=60 else curses.color_pair(24))))
                 else: attr = (curses.color_pair(1)|curses.A_DIM) if val==0 else ((curses.color_pair(21)|curses.A_DIM) if val<=15 else (curses.color_pair(22) if val<=30 else ((curses.color_pair(23)|curses.A_BOLD) if val<=60 else (curses.color_pair(24)|curses.A_BOLD))))
                 safe_addstr(stdscr, dy+3, 4+(wk*2), "■ ", attr)
-        safe_addstr(stdscr, h-1, 2, "PRESS [ESC] BACK", curses.color_pair(1))
+        safe_addstr(stdscr, h-1, 2, "[L] Todo  PRESS [ESC] BACK", curses.color_pair(1))
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k in [27, ord('q'), ord('Q')]: return 'HISTORY'
         nav = check_nav_keys(k); 
@@ -612,7 +612,7 @@ def show_weekly_dungeon(stdscr):
         safe_addstr(stdscr, ft_y+1, w//2, "QUEST LOG:", curses.A_UNDERLINE)
         for idx, q in enumerate(history[:3]):
             if ft_y + 2 + idx < h - 1: safe_addstr(stdscr, ft_y+2+idx, w//2, f"[✔] {q.get('task','-')[:20]} (+{q.get('duration_minutes',0)} XP)")
-        safe_addstr(stdscr, h-1, 2, "[ESC] Return", curses.color_pair(9))
+        safe_addstr(stdscr, h-1, 2, "[L] Todo  [ESC] Return", curses.color_pair(9))
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1:
             if frame < graph_h: frame += 1; time.sleep(0.02)
@@ -667,7 +667,7 @@ def show_daily_raid(stdscr):
             if mds:
                 safe_addstr(stdscr, sy+8, x, "ACTIVE BUFFS:", curses.color_pair(12)|curses.A_UNDERLINE)
                 for mi, m in enumerate(mds): safe_addstr(stdscr, sy+9+mi, x, f"⚡ {m}", curses.color_pair(11)|curses.A_BOLD)
-        safe_addstr(stdscr, h-1, 2, "[Arrows] Select  [ESC] Retreat", curses.color_pair(1)|curses.A_BOLD)
+        safe_addstr(stdscr, h-1, 2, "[L] Todo  [Arrows] Select  [ESC] Retreat", curses.color_pair(1)|curses.A_BOLD)
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1: time.sleep(0.05); continue
         if k in [27, ord('q'), ord('Q')]: return 'HISTORY'
@@ -692,7 +692,7 @@ def show_info_screen(stdscr):
         if y+4 < h-2: safe_addstr(stdscr, y+4, x+3, "▒  (Med)", curses.color_pair(8)|curses.A_DIM)
         y += 6
         if y < h-2: safe_addstr(stdscr, y, x, "3. CONTROLS", curses.color_pair(11)|curses.A_BOLD)
-        keys = [("[N]","New"), ("[T]","Timer"), ("[H]","Heatmap"), ("[W]","Dungeon"), ("[R]","Raid"), ("[D]","Delete"), ("[S]","Settings")]
+        keys = [("[N]","New"), ("[L]","Todo"), ("[T]","Timer"), ("[H]","Heatmap"), ("[W]","Dungeon"), ("[R]","Raid"), ("[D]","Delete"), ("[S]","Settings")]
         for i, (k, desc) in enumerate(keys):
             if y+1+(i//2) < h-2: 
                 col = 3 if i%2==0 else 25
