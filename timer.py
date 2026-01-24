@@ -788,7 +788,11 @@ def show_todo_list(stdscr):
                 if mode == 'DAILY':
                     try:
                         dt = datetime.strptime(k, "%Y-%m-%d")
-                        lbl = dt.strftime("%d/%b/%Y").upper()
+                        lbl = dt.strftime("%a %d/%b/%Y").upper()
+                        if k == datetime.now().strftime("%Y-%m-%d"):
+                            lbl = f"★ {lbl}"
+                        else:
+                            lbl = f"  {lbl}"
                     except: lbl = k
                 else: lbl = k
                 
