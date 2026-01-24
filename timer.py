@@ -56,6 +56,8 @@ SESSION = {
     'show_colon': True
 }
 
+UNDO_STACK = []
+
 # --- Data Management ---
 def load_todos():
     if not os.path.exists(TODO_FILE): return []
@@ -129,8 +131,40 @@ def toggle_todo(todo_id):
 
 def delete_todo(todo_id):
     todos = load_todos()
-    todos = [t for t in todos if t['id'] != todo_id]
-    save_todos(todos)
+    item = next((t for t in todos if t['id'] == todo_id), None)
+    if item:
+        UNDO_STACK.append({'type': 'todo', 'data': item})
+        todos = [t for t in todos if t['id'] != todo_id]
+        save_todos(todos)
+
+def restore_last_deleted_item():
+    if not UNDO_STACK: return False
+    item = UNDO_STACK.pop()
+    if item['type'] == 'todo':
+        todos = load_todos()
+        todos.append(item['data'])
+        save_todos(todos)
+    elif item['type'] == 'project':
+        cfg = load_config()
+        p_name = item['data']['name']
+        p_tags = item['data']['tags']
+        cfg['project_tags'][p_name] = p_tags
+        save_config(cfg)
+    return True
+
+def add_project(name):
+    if not name: return
+    cfg = load_config()
+    if name not in cfg['project_tags']:
+        cfg['project_tags'][name] = []
+        save_config(cfg)
+
+def delete_project(name):
+    cfg = load_config()
+    if name in cfg['project_tags']:
+        UNDO_STACK.append({'type': 'project', 'data': {'name': name, 'tags': cfg['project_tags'][name]}})
+        del cfg['project_tags'][name]
+        save_config(cfg)
 
 def load_history():
     if not os.path.exists(DATA_FILE): return []
@@ -154,7 +188,10 @@ def save_config(cfg):
 
 def get_unique_projects():
     history = load_history()
-    return sorted(list(set(i['project'] for i in history if i.get('project'))))
+    cfg = load_config()
+    hist_projs = set(i['project'] for i in history if i.get('project'))
+    cfg_projs = set(cfg.get('project_tags', {}).keys())
+    return sorted(list(hist_projs.union(cfg_projs)))
 
 def get_unique_tasks(project_name):
     history = load_history()
@@ -396,7 +433,7 @@ def select_duration(stdscr):
 # --- Screens ---
 
 def show_settings(stdscr):
-    cfg = load_config(); opts = ["Manage Project Tags", "Manage Classes", "Save & Return"]
+    cfg = load_config(); opts = ["Manage Projects", "Manage Classes", "Save & Return"]
     sel = 0
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
@@ -410,13 +447,27 @@ def show_settings(stdscr):
         elif k == curses.KEY_DOWN: sel = min(len(opts)-1, sel+1)
         elif k in [10, 13]:
             if sel == 0: # Manage Projects
-                projs = get_unique_projects()
+                projs = get_unique_projects() + ["+ ADD NEW PROJECT"]
                 p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT PROJECT", projs)
-                if p:
-                    curr_tags = cfg['project_tags'].get(p, [])
-                    val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
-                    if val is not None:
-                        cfg['project_tags'][p] = [t.strip() for t in val.split(',') if t.strip()]
+                if p == "+ ADD NEW PROJECT":
+                    new_p = text_input(stdscr, h//2, w//2 - 20, "PROJECT NAME:")
+                    if new_p: add_project(new_p); cfg = load_config()
+                elif p:
+                    act = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {p}", ["Edit Tags", "Delete Project", "Cancel"])
+                    if act == "Edit Tags":
+                        curr_tags = cfg['project_tags'].get(p, [])
+                        val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
+                        if val is not None:
+                            cfg['project_tags'][p] = [t.strip() for t in val.split(',') if t.strip()]
+                    elif act == "Delete Project":
+                        msg = f" DELETE PROJECT '{p}'? (y/n) "
+                        safe_addstr(stdscr, h-1, 2, " " * (w-3))
+                        safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
+                        stdscr.refresh()
+                        stdscr.timeout(-1)
+                        if stdscr.getch() in [ord('y'), ord('Y')]:
+                            delete_project(p); cfg = load_config()
+                        stdscr.timeout(50)
             elif sel == 1: # Manage Classes
                 cls_names = [c['name'] for c in cfg['classes']] + ["+ ADD NEW CLASS"]
                 c = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT CLASS", cls_names)
@@ -888,6 +939,7 @@ def show_todo_list(stdscr):
     expanded = set()
     sel_idx = 0
     scroll_idx = 0
+    delete_pending_idx = -1 # Track which item is pending deletion
     
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
@@ -971,8 +1023,11 @@ def show_todo_list(stdscr):
                     prefix = "★ "
                     
                 safe_addstr(stdscr, 4+i, 4, f"{prefix}{st} {item['content']}{tags}", attr|col)
+                
+            if ii == delete_pending_idx:
+                safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
         
-        safe_addstr(stdscr, h-1, 2, "[TAB] View  [N] New  [Enter] Toggle  [B] Backlog  [D] Del  [ESC] Back", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, "[TAB] View  [N] New  [Enter] Toggle  [B] Backlog  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
@@ -984,13 +1039,19 @@ def show_todo_list(stdscr):
         if k in [ord('b'), ord('B')]:
             res = show_backlog_view(stdscr)
             if res != 'TODO': return res
+            
+        if k in [ord('u'), ord('U')]:
+             restore_last_deleted_item()
+             delete_pending_idx = -1 # Clear pending state if any
         
         if k == 9:
             mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
             expanded = set()
-            sel_idx = 0; scroll_idx = 0
-        elif k in [curses.KEY_DOWN, ord('j')]: sel_idx += 1
-        elif k in [curses.KEY_UP, ord('k')]: sel_idx -= 1
+            sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
+        elif k in [curses.KEY_DOWN, ord('j')]: 
+            sel_idx += 1; delete_pending_idx = -1
+        elif k in [curses.KEY_UP, ord('k')]: 
+            sel_idx -= 1; delete_pending_idx = -1
         elif k in [10, 13]:
             if tree:
                 node = tree[sel_idx]
@@ -999,13 +1060,20 @@ def show_todo_list(stdscr):
                     else: expanded.add(node['key'])
                 else:
                     toggle_todo(node['data']['id'])
+            delete_pending_idx = -1
         elif k in [ord('n'), ord('N')]:
-            add_new_todo_dialog(stdscr)
+            add_new_todo_dialog(stdscr); delete_pending_idx = -1
         elif k in [ord('d'), ord('D')]:
             if tree:
-                node = tree[sel_idx]
-                if node['type'] == 'item':
-                    delete_todo(node['data']['id'])
+                if delete_pending_idx == sel_idx:
+                     node = tree[sel_idx]
+                     if node['type'] == 'item':
+                         delete_todo(node['data']['id'])
+                     delete_pending_idx = -1
+                else:
+                     node = tree[sel_idx]
+                     if node['type'] == 'item':
+                         delete_pending_idx = sel_idx
         elif k == 27: return 'HISTORY'
 
 def calculate_stats():
