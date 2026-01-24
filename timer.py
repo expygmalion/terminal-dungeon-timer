@@ -81,20 +81,6 @@ def add_todo(content, date_str, project, tags):
     }
     todos.append(new_todo)
     save_todos(todos)
-    
-    if project and project != "General" and tags:
-        cfg = load_config()
-        if project not in cfg['project_tags']:
-            cfg['project_tags'][project] = []
-        
-        changed = False
-        for t in tags:
-            if t not in cfg['project_tags'][project]:
-                cfg['project_tags'][project].append(t)
-                changed = True
-        
-        if changed:
-            save_config(cfg)
 
 def complete_matching_todo(project, content):
     todos = load_todos()
@@ -137,15 +123,25 @@ def delete_todo(todo_id):
         todos = [t for t in todos if t['id'] != todo_id]
         save_todos(todos)
 
-def add_project(name, color_id=None):
+def add_project(name, color_id=None, tags=None):
     if not name: return
     cfg = load_config()
+    
+    # Always ensure the key exists, even if tags is empty
     if name not in cfg['project_tags']:
-        cfg['project_tags'][name] = []
-        if color_id:
-             if 'project_colors' not in cfg: cfg['project_colors'] = {}
-             cfg['project_colors'][name] = color_id
-        save_config(cfg)
+        cfg['project_tags'][name] = tags if tags else []
+    elif tags: 
+        # If project exists and we provided tags, merge/overwrite? 
+        # For new project flow, it shouldn't exist. If it does, we probably just want to update colors/tags?
+        # Let's simple append for safety or overwrite if empty.
+        # But per requirements "project tags should be assigned per task" (creation flow), 
+        # this implies defining them. Let's just set them if provided.
+        cfg['project_tags'][name] = tags
+
+    if color_id:
+            if 'project_colors' not in cfg: cfg['project_colors'] = {}
+            cfg['project_colors'][name] = color_id
+    save_config(cfg)
 
 def delete_project(name):
     cfg = load_config()
@@ -826,13 +822,21 @@ def add_new_todo_dialog(stdscr):
     if p is None: return
     
     new_proj_color = None
+    new_proj_tags = []
+    
     if p == "+ NEW PROJECT":
         p = text_input(stdscr, h//2 + 2, w//2 - 20, "NEW PROJECT NAME:")
         if not p: return
+        
+        # Project Tags
+        p_tags_str = text_input(stdscr, h//2 + 4, w//2 - 20, "PROJECT TAGS (comma sep):")
+        if p_tags_str is None: return
+        new_proj_tags = [t.strip() for t in p_tags_str.split(',')] if p_tags_str else []
+        
         # Select Color for new project
         new_proj_color = select_color(stdscr, h//2 - 5, w//2 + 22)
     
-    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TAGS (ESC to Cancel):")
+    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TASK TAGS (ESC to Cancel):")
     if tags_str is None: return
     tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
     
@@ -846,8 +850,9 @@ def add_new_todo_dialog(stdscr):
     stdscr.timeout(50)
     if k in [ord('y'), ord('Y')]:
         add_todo(content, d_str, p, tags)
-        if new_proj_color:
-             add_project(p, new_proj_color)
+        if new_proj_color or new_proj_tags or p not in projs:
+             # Even if no color/tags, we need to save the new project entry
+             add_project(p, new_proj_color, new_proj_tags)
 
 def show_backlog_view(stdscr):
     sel_idx = -1
