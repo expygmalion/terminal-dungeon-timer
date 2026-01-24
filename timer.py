@@ -939,11 +939,13 @@ def show_todo_list(stdscr):
     expanded = set()
     sel_idx = 0
     scroll_idx = 0
-    delete_pending_idx = -1 # Track which item is pending deletion
+    delete_pending_idx = -1
+    jump_target = None # For auto-jump logic
     
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
         todos = load_todos()
+        today_str = datetime.now().strftime("%Y-%m-%d")
         
         tree = []
         if mode == 'DAILY':
@@ -960,22 +962,50 @@ def show_todo_list(stdscr):
                 if k in expanded:
                     for item in items:
                         tree.append({'type': 'item', 'data': item, 'parent': k})
-        else:
-            groups = {}
+        else: # PROJECT MODE (Restructured: Project -> Date -> Task)
+            p_groups = {}
             for t in todos:
-                p = t.get('project', 'General')
-                if not p: p = "General"
-                if p not in groups: groups[p] = []
-                groups[p].append(t)
-            sorted_keys = sorted(groups.keys(), key=lambda x: (0 if x=='General' else 1, x))
-            for k in sorted_keys:
-                items = sorted(groups[k], key=lambda x: x.get('date', ''))
-                done_c = sum(1 for i in items if i['status']=='done')
-                tree.append({'type': 'group', 'key': k, 'items': items, 'done': done_c, 'total': len(items)})
-                if k in expanded:
-                    for item in items:
-                        tree.append({'type': 'item', 'data': item, 'parent': k})
+                p = t.get('project', 'General') or "General"
+                if p not in p_groups: p_groups[p] = []
+                p_groups[p].append(t)
+            
+            sorted_projs = sorted(p_groups.keys(), key=lambda x: (0 if x=='General' else 1, x))
+            
+            for p in sorted_projs:
+                p_items = p_groups[p]
+                
+                # Project Level Stats
+                done_p = sum(1 for i in p_items if i['status']=='done')
+                tree.append({'type': 'project', 'key': p, 'done': done_p, 'total': len(p_items)})
+                
+                if p in expanded:
+                    # Group by Date inside Project
+                    d_groups = {}
+                    for t in p_items:
+                        d = t.get('date', 'Unknown')
+                        if d not in d_groups: d_groups[d] = []
+                        d_groups[d].append(t)
+                    
+                    # Sort Dates (Today/Newest first)
+                    sorted_dates = sorted(d_groups.keys(), reverse=True)
+                    
+                    for d in sorted_dates:
+                        d_items = sorted(d_groups[d], key=lambda x: x.get('content', '')) # Sort tasks by content or keeping order?
+                        d_done = sum(1 for i in d_items if i['status']=='done')
+                        d_key = f"{p}|{d}"
                         
+                        tree.append({'type': 'date_group', 'key': d_key, 'date': d, 'done': d_done, 'total': len(d_items), 'parent': p})
+                        
+                        # Auto-jump target check
+                        if jump_target == d_key:
+                             sel_idx = len(tree) - 1
+                             jump_target = None
+                        
+                        if d_key in expanded:
+                            for item in d_items:
+                                tree.append({'type': 'item', 'data': item, 'parent': d_key})
+
+        # Tabs Header
         tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
         tabs += f" [PROJECT] " if mode=='PROJECT' else "  PROJECT  "
         safe_addstr(stdscr, 1, 2, tabs, curses.color_pair(3)|curses.A_BOLD)
@@ -995,34 +1025,50 @@ def show_todo_list(stdscr):
             is_sel = (ii == sel_idx)
             attr = curses.A_REVERSE if is_sel else 0
             
-            if node['type'] == 'group':
+            # Render Logic
+            if node['type'] == 'group': # DAILY Mode Header
                 k = node['key']
-                if mode == 'DAILY':
-                    try:
-                        dt = datetime.strptime(k, "%Y-%m-%d")
-                        lbl = dt.strftime("%a %d/%b/%Y").upper()
-                        if k == datetime.now().strftime("%Y-%m-%d"):
-                            lbl = f"★ {lbl}"
-                        else:
-                            lbl = f"  {lbl}"
-                    except: lbl = k
-                else: lbl = k
-                
+                try:
+                    dt = datetime.strptime(k, "%Y-%m-%d")
+                    lbl = dt.strftime("%a %d/%b/%Y").upper()
+                    if k == today_str: lbl = f"★ {lbl}"
+                    else: lbl = f"  {lbl}"
+                except: lbl = k
                 pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
                 icon = "[-]" if k in expanded else "[+]"
-                safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<20} {pct:>3}% DONE ({node['done']}/{node['total']})", attr|curses.color_pair(4))
-            else:
+                safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|curses.color_pair(4))
+            
+            elif node['type'] == 'project': # PROJECT Mode Top Level
+                k = node['key']
+                pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+                icon = "[-]" if k in expanded else "[+]"
+                safe_addstr(stdscr, 4+i, 2, f"{icon} {k:<25} {pct:>3}%", attr|curses.color_pair(3)|curses.A_BOLD)
+                
+            elif node['type'] == 'date_group': # PROJECT Mode Date Sub-Level
+                d = node['date']
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d")
+                    lbl = dt.strftime("%a %d/%b/%Y").upper()
+                    if d == today_str: lbl = f"★ {lbl}"
+                    else: lbl = f"  {lbl}"
+                except: lbl = d
+                
+                pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+                icon = "v" if node['key'] in expanded else ">"
+                safe_addstr(stdscr, 4+i, 4, f"{icon} {lbl:<23} {pct:>3}%", attr|curses.color_pair(4))
+
+            elif node['type'] == 'item':
                 item = node['data']
                 st = "[x]" if item['status']=='done' else "[ ]"
                 col = curses.color_pair(2) if item['status']=='done' else 0
                 tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
                 
-                # Check for today
+                # Check for today (redundant visually if under Today header, but kept for consistency)
                 prefix = "  "
-                if item.get('date') == datetime.now().strftime("%Y-%m-%d"):
-                    prefix = "★ "
-                    
-                safe_addstr(stdscr, 4+i, 4, f"{prefix}{st} {item['content']}{tags}", attr|col)
+                # Indent based on mode
+                indent = 4 if mode == 'DAILY' else 6
+                
+                safe_addstr(stdscr, 4+i, indent, f"{prefix}{st} {item['content']}{tags}", attr|col)
                 
             if ii == delete_pending_idx:
                 safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
@@ -1042,7 +1088,7 @@ def show_todo_list(stdscr):
             
         if k in [ord('u'), ord('U')]:
              restore_last_deleted_item()
-             delete_pending_idx = -1 # Clear pending state if any
+             delete_pending_idx = -1
         
         if k == 9:
             mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
@@ -1055,9 +1101,17 @@ def show_todo_list(stdscr):
         elif k in [10, 13]:
             if tree:
                 node = tree[sel_idx]
-                if node['type'] == 'group':
-                    if node['key'] in expanded: expanded.remove(node['key'])
-                    else: expanded.add(node['key'])
+                if node['type'] in ['group', 'project', 'date_group']:
+                    key = node['key']
+                    if key in expanded: expanded.remove(key)
+                    else: 
+                        expanded.add(key)
+                        # Auto-expand logic for Projects
+                        if node['type'] == 'project':
+                            # Expand the Today group inside it if exists
+                            today_key = f"{key}|{today_str}"
+                            expanded.add(today_key) # Auto-expand the date group
+                            jump_target = today_key # Set jump target for next render
                 else:
                     toggle_todo(node['data']['id'])
             delete_pending_idx = -1
