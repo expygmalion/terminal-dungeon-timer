@@ -1114,10 +1114,10 @@ def show_todo_list(stdscr):
                 
                 # Check backlog (past incomplete) for dashes
                 is_backlog = d < today_str and node['done'] < node['total']
-                line_char = "├─" if not node['is_last'] else "└─"
-                if is_backlog: line_char = "├╌" if not node['is_last'] else "└╌"
+                line_char = "  ├─" if not node['is_last'] else "  └─"
+                if is_backlog: line_char = "  ├╌" if not node['is_last'] else "  └╌"
                 
-                safe_addstr(stdscr, 4+i, 2, f"  {line_char}", col)
+                safe_addstr(stdscr, 4+i, 2, f"{line_char}", col)
                 safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|curses.color_pair(4))
 
             elif node['type'] == 'item':
@@ -1153,9 +1153,20 @@ def show_todo_list(stdscr):
                     try: tree_col = curses.color_pair(col_id)
                     except: tree_col = curses.color_pair(3)
                     
-                    line_char = "│  ├─" if not node.get('is_last') else "│  └─"
-                    # We need to know if parent date group was last to decide if we draw vertical bar
-                    # Simplified for TUI:
+                    # Indentation for items under Date
+                    # Date is at x=6 (label), tree line ends at 6.
+                    # Items should be indented further.
+                    # Visual:
+                    #   └─ DATE
+                    #      └─ [ ] Item
+                    
+                    indent = 9
+                    line_char = "     ├─" if not node.get('is_last') else "     └─"
+                    
+                    # Dashed line for pending items
+                    if item['status'] == 'pending':
+                         line_char = "     ├╌" if not node.get('is_last') else "     └╌"
+                    
                     safe_addstr(stdscr, 4+i, 2, line_char, tree_col)
                     prefix = ""
                 
