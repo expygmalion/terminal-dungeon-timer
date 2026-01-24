@@ -761,6 +761,128 @@ def add_new_todo_dialog(stdscr):
     if k in [ord('y'), ord('Y')]:
         add_todo(content, d_str, p, tags)
 
+def show_backlog_view(stdscr):
+    sel_idx = -1
+    scroll_idx = 0
+    
+    while True:
+        tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
+        todos = load_todos()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # Filter for past items only
+        past_todos = [t for t in todos if t.get('date', '9999-99-99') < today_str]
+        
+        tree = []
+        groups = {}
+        for t in past_todos:
+            d = t.get('date', 'Unknown')
+            if d not in groups: groups[d] = []
+            groups[d].append(t)
+        
+        # Sort by date descending (newest backlog first)
+        sorted_keys = sorted(groups.keys(), reverse=True)
+        
+        # Build flattened tree
+        selectable_indices = []
+        curr_row = 0
+        
+        for k in sorted_keys:
+            items = groups[k]
+            # Add Header
+            done_c = sum(1 for i in items if i['status']=='done')
+            tree.append({'type': 'group', 'key': k, 'done': done_c, 'total': len(items)})
+            curr_row += 1
+            
+            # Add Items
+            for item in items:
+                tree.append({'type': 'item', 'data': item})
+                if item['status'] == 'pending':
+                    selectable_indices.append(curr_row)
+                curr_row += 1
+        
+        # Header
+        safe_addstr(stdscr, 1, 2, "  BACKLOG REVIEW  ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+        safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(5))
+        
+        list_h = h - 5
+        
+        # Auto-select first selectable if selection invalid
+        if selectable_indices and (sel_idx < 0 or sel_idx not in selectable_indices):
+            # Try to find nearest or default to first
+            if sel_idx < 0: sel_idx = selectable_indices[0]
+            else:
+                # Find closest match
+                sel_idx = min(selectable_indices, key=lambda x: abs(x-sel_idx))
+        
+        if not selectable_indices: sel_idx = -1
+        
+        # Scroll logic
+        if sel_idx >= 0:
+            if sel_idx < scroll_idx: scroll_idx = sel_idx
+            elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
+        
+        # Render
+        if not tree:
+            safe_addstr(stdscr, 4, 4, "No backlog items found!", curses.A_DIM)
+        else:
+            for i in range(list_h):
+                ii = scroll_idx + i
+                if ii >= len(tree): break
+                node = tree[ii]
+                is_sel = (ii == sel_idx)
+                
+                if node['type'] == 'group':
+                    k = node['key']
+                    try:
+                        dt = datetime.strptime(k, "%Y-%m-%d")
+                        lbl = dt.strftime("%a %d/%b/%Y").upper()
+                    except: lbl = k
+                    pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+                    safe_addstr(stdscr, 4+i, 2, f"[-] {lbl:<20} {pct:>3}% DONE", curses.color_pair(4)|curses.A_BOLD)
+                else:
+                    item = node['data']
+                    st = "[x]" if item['status']=='done' else "[ ]"
+                    
+                    if item['status'] == 'done':
+                        attr = curses.A_DIM
+                        col = 0
+                    else:
+                        attr = curses.A_REVERSE if is_sel else 0
+                        col = curses.color_pair(5) # Red for pending
+                        
+                    tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
+                    safe_addstr(stdscr, 4+i, 4, f"  {st} {item['content']}{tags}", attr|col)
+
+        safe_addstr(stdscr, h-1, 2, "[Enter] Complete  [B/ESC] Return", curses.color_pair(4))
+        stdscr.refresh()
+        stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
+        
+        if k == -1: time.sleep(0.05); continue
+        
+        nav = check_nav_keys(k)
+        if nav: return nav
+        
+        if k in [ord('b'), ord('B'), 27]: return 'TODO'
+        
+        if not selectable_indices: continue
+        
+        if k in [curses.KEY_DOWN, ord('j')]:
+            # Find next selectable index > sel_idx
+            next_idxs = [x for x in selectable_indices if x > sel_idx]
+            if next_idxs: sel_idx = next_idxs[0]
+        elif k in [curses.KEY_UP, ord('k')]:
+            # Find prev selectable index < sel_idx
+            prev_idxs = [x for x in selectable_indices if x < sel_idx]
+            if prev_idxs: sel_idx = prev_idxs[-1]
+        elif k in [10, 13]: # Enter
+             if 0 <= sel_idx < len(tree) and tree[sel_idx]['type'] == 'item':
+                 toggle_todo(tree[sel_idx]['data']['id'])
+                 # Don't move selection immediately, let next render loop handle state change (it will become unselectable)
+                 # But we might want to auto-jump to next?
+                 # Let's let the loop re-calculate selectable_indices. 
+                 # If current sel_idx becomes invalid (completed), the auto-select logic at top of loop will pick nearest.
+
 def show_todo_list(stdscr):
     mode = 'DAILY'
     expanded = set()
@@ -850,7 +972,7 @@ def show_todo_list(stdscr):
                     
                 safe_addstr(stdscr, 4+i, 4, f"{prefix}{st} {item['content']}{tags}", attr|col)
         
-        safe_addstr(stdscr, h-1, 2, "[TAB] Switch View  [N] New  [Enter] Toggle  [D] Delete  [ESC] Back", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, "[TAB] View  [N] New  [Enter] Toggle  [B] Backlog  [D] Del  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
@@ -858,6 +980,10 @@ def show_todo_list(stdscr):
         
         nav = check_nav_keys(k)
         if nav and nav != 'TODO': return nav
+        
+        if k in [ord('b'), ord('B')]:
+            res = show_backlog_view(stdscr)
+            if res != 'TODO': return res
         
         if k == 9:
             mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
