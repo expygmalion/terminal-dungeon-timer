@@ -137,6 +137,27 @@ def delete_todo(todo_id):
         todos = [t for t in todos if t['id'] != todo_id]
         save_todos(todos)
 
+def add_project(name, color_id=None):
+    if not name: return
+    cfg = load_config()
+    if name not in cfg['project_tags']:
+        cfg['project_tags'][name] = []
+        if color_id:
+             if 'project_colors' not in cfg: cfg['project_colors'] = {}
+             cfg['project_colors'][name] = color_id
+        save_config(cfg)
+
+def delete_project(name):
+    cfg = load_config()
+    if name in cfg['project_tags']:
+        # Also undo color
+        col = cfg.get('project_colors', {}).get(name)
+        UNDO_STACK.append({'type': 'project', 'data': {'name': name, 'tags': cfg['project_tags'][name], 'color': col}})
+        del cfg['project_tags'][name]
+        if 'project_colors' in cfg and name in cfg['project_colors']:
+            del cfg['project_colors'][name]
+        save_config(cfg)
+
 def restore_last_deleted_item():
     if not UNDO_STACK: return False
     item = UNDO_STACK.pop()
@@ -149,22 +170,11 @@ def restore_last_deleted_item():
         p_name = item['data']['name']
         p_tags = item['data']['tags']
         cfg['project_tags'][p_name] = p_tags
+        if item['data'].get('color'):
+             if 'project_colors' not in cfg: cfg['project_colors'] = {}
+             cfg['project_colors'][p_name] = item['data']['color']
         save_config(cfg)
     return True
-
-def add_project(name):
-    if not name: return
-    cfg = load_config()
-    if name not in cfg['project_tags']:
-        cfg['project_tags'][name] = []
-        save_config(cfg)
-
-def delete_project(name):
-    cfg = load_config()
-    if name in cfg['project_tags']:
-        UNDO_STACK.append({'type': 'project', 'data': {'name': name, 'tags': cfg['project_tags'][name]}})
-        del cfg['project_tags'][name]
-        save_config(cfg)
 
 def load_history():
     if not os.path.exists(DATA_FILE): return []
@@ -782,6 +792,24 @@ def show_info_screen(stdscr):
         if nav and nav != 'INFO': return nav
         return 'HISTORY'
 
+PROJECT_COLORS_NAMES = ["Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White", "Crimson", "Lime", "Violet"]
+
+def select_color(stdscr, y, x):
+    sel = 0
+    while True:
+        draw_box(stdscr, y, x, 14, 20, "SELECT COLOR")
+        for i, name in enumerate(PROJECT_COLORS_NAMES):
+            attr = curses.A_REVERSE if i == sel else 0
+            safe_addstr(stdscr, y+1+i, x+2, f" {name:<10}", attr | curses.color_pair(30+i))
+        
+        stdscr.refresh()
+        k = stdscr.getch()
+        
+        if k == curses.KEY_UP: sel = max(0, sel-1)
+        elif k == curses.KEY_DOWN: sel = min(len(PROJECT_COLORS_NAMES)-1, sel+1)
+        elif k in [10, 13]: return 30 + sel # Return Color Pair ID
+        elif k == 27: return None # Cancel
+
 def add_new_todo_dialog(stdscr):
     h, w = stdscr.getmaxyx()
     content = text_input(stdscr, h//2 - 6, w//2 - 20, "TASK CONTENT (ESC to Cancel):")
@@ -793,9 +821,16 @@ def add_new_todo_dialog(stdscr):
     if d_str is None: return
     if not d_str: d_str = today
     
-    projs = ["General"] + get_unique_projects()
+    projs = ["General"] + get_unique_projects() + ["+ NEW PROJECT"]
     p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "PROJECT (ESC to Cancel)", projs)
     if p is None: return
+    
+    new_proj_color = None
+    if p == "+ NEW PROJECT":
+        p = text_input(stdscr, h//2 + 2, w//2 - 20, "NEW PROJECT NAME:")
+        if not p: return
+        # Select Color for new project
+        new_proj_color = select_color(stdscr, h//2 - 5, w//2 + 22)
     
     tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TAGS (ESC to Cancel):")
     if tags_str is None: return
@@ -811,6 +846,8 @@ def add_new_todo_dialog(stdscr):
     stdscr.timeout(50)
     if k in [ord('y'), ord('Y')]:
         add_todo(content, d_str, p, tags)
+        if new_proj_color:
+             add_project(p, new_proj_color)
 
 def show_backlog_view(stdscr):
     sel_idx = -1
@@ -940,12 +977,14 @@ def show_todo_list(stdscr):
     sel_idx = 0
     scroll_idx = 0
     delete_pending_idx = -1
-    jump_target = None # For auto-jump logic
+    jump_target = None
     
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
         todos = load_todos()
         today_str = datetime.now().strftime("%Y-%m-%d")
+        cfg = load_config()
+        p_colors = cfg.get('project_colors', {})
         
         tree = []
         if mode == 'DAILY':
@@ -971,12 +1010,13 @@ def show_todo_list(stdscr):
             
             sorted_projs = sorted(p_groups.keys(), key=lambda x: (0 if x=='General' else 1, x))
             
-            for p in sorted_projs:
+            for i_p, p in enumerate(sorted_projs):
                 p_items = p_groups[p]
                 
                 # Project Level Stats
                 done_p = sum(1 for i in p_items if i['status']=='done')
-                tree.append({'type': 'project', 'key': p, 'done': done_p, 'total': len(p_items)})
+                is_last_proj = (i_p == len(sorted_projs) - 1)
+                tree.append({'type': 'project', 'key': p, 'done': done_p, 'total': len(p_items), 'is_last': is_last_proj})
                 
                 if p in expanded:
                     # Group by Date inside Project
@@ -989,21 +1029,22 @@ def show_todo_list(stdscr):
                     # Sort Dates (Today/Newest first)
                     sorted_dates = sorted(d_groups.keys(), reverse=True)
                     
-                    for d in sorted_dates:
-                        d_items = sorted(d_groups[d], key=lambda x: x.get('content', '')) # Sort tasks by content or keeping order?
+                    for i_d, d in enumerate(sorted_dates):
+                        d_items = sorted(d_groups[d], key=lambda x: x.get('content', '')) 
                         d_done = sum(1 for i in d_items if i['status']=='done')
                         d_key = f"{p}|{d}"
+                        is_last_date = (i_d == len(sorted_dates) - 1)
                         
-                        tree.append({'type': 'date_group', 'key': d_key, 'date': d, 'done': d_done, 'total': len(d_items), 'parent': p})
+                        tree.append({'type': 'date_group', 'key': d_key, 'date': d, 'done': d_done, 'total': len(d_items), 'parent': p, 'is_last': is_last_date})
                         
-                        # Auto-jump target check
                         if jump_target == d_key:
                              sel_idx = len(tree) - 1
                              jump_target = None
                         
                         if d_key in expanded:
-                            for item in d_items:
-                                tree.append({'type': 'item', 'data': item, 'parent': d_key})
+                            for i_t, item in enumerate(d_items):
+                                is_last_item = (i_t == len(d_items) - 1)
+                                tree.append({'type': 'item', 'data': item, 'parent': d_key, 'is_last': is_last_item})
 
         # Tabs Header
         tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
@@ -1042,10 +1083,16 @@ def show_todo_list(stdscr):
                 k = node['key']
                 pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
                 icon = "[-]" if k in expanded else "[+]"
-                safe_addstr(stdscr, 4+i, 2, f"{icon} {k:<25} {pct:>3}%", attr|curses.color_pair(3)|curses.A_BOLD)
+                # Project Color
+                col_id = p_colors.get(k, 3) # Default Blue
+                try: col = curses.color_pair(col_id)
+                except: col = curses.color_pair(3)
+                
+                safe_addstr(stdscr, 4+i, 2, f"{icon} {k:<25} {pct:>3}%", attr|col|curses.A_BOLD)
                 
             elif node['type'] == 'date_group': # PROJECT Mode Date Sub-Level
                 d = node['date']
+                p_name = node['parent']
                 try:
                     dt = datetime.strptime(d, "%Y-%m-%d")
                     lbl = dt.strftime("%a %d/%b/%Y").upper()
@@ -1054,8 +1101,19 @@ def show_todo_list(stdscr):
                 except: lbl = d
                 
                 pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                icon = "v" if node['key'] in expanded else ">"
-                safe_addstr(stdscr, 4+i, 4, f"{icon} {lbl:<23} {pct:>3}%", attr|curses.color_pair(4))
+                
+                # Tree lines
+                col_id = p_colors.get(p_name, 3)
+                try: col = curses.color_pair(col_id)
+                except: col = curses.color_pair(3)
+                
+                # Check backlog (past incomplete) for dashes
+                is_backlog = d < today_str and node['done'] < node['total']
+                line_char = "├─" if not node['is_last'] else "└─"
+                if is_backlog: line_char = "├╌" if not node['is_last'] else "└╌"
+                
+                safe_addstr(stdscr, 4+i, 2, f"  {line_char}", col)
+                safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|curses.color_pair(4))
 
             elif node['type'] == 'item':
                 item = node['data']
@@ -1063,10 +1121,38 @@ def show_todo_list(stdscr):
                 col = curses.color_pair(2) if item['status']=='done' else 0
                 tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
                 
-                # Check for today (redundant visually if under Today header, but kept for consistency)
-                prefix = "  "
-                # Indent based on mode
-                indent = 4 if mode == 'DAILY' else 6
+                prefix = ""
+                indent = 4
+                
+                if mode == 'DAILY':
+                    indent = 4
+                    # Use Project Color for task text in Daily View
+                    p_name = item.get('project')
+                    if p_name and p_name != "General":
+                         col_id = p_colors.get(p_name, 0)
+                         if col_id and not item['status']=='done':
+                             try: col = curses.color_pair(col_id)
+                             except: pass
+                    
+                    # Backlog dashes
+                    if item.get('date', '9999') < today_str and item['status'] == 'pending':
+                         prefix = "╌╌ "
+                    else:
+                         prefix = "   "
+                         
+                else: # PROJECT Mode
+                    indent = 6
+                    # Tree lines for tasks
+                    p_name = node.get('parent', '').split('|')[0]
+                    col_id = p_colors.get(p_name, 3)
+                    try: tree_col = curses.color_pair(col_id)
+                    except: tree_col = curses.color_pair(3)
+                    
+                    line_char = "│  ├─" if not node.get('is_last') else "│  └─"
+                    # We need to know if parent date group was last to decide if we draw vertical bar
+                    # Simplified for TUI:
+                    safe_addstr(stdscr, 4+i, 2, line_char, tree_col)
+                    prefix = ""
                 
                 safe_addstr(stdscr, 4+i, indent, f"{prefix}{st} {item['content']}{tags}", attr|col)
                 
@@ -1106,12 +1192,10 @@ def show_todo_list(stdscr):
                     if key in expanded: expanded.remove(key)
                     else: 
                         expanded.add(key)
-                        # Auto-expand logic for Projects
                         if node['type'] == 'project':
-                            # Expand the Today group inside it if exists
                             today_key = f"{key}|{today_str}"
-                            expanded.add(today_key) # Auto-expand the date group
-                            jump_target = today_key # Set jump target for next render
+                            expanded.add(today_key)
+                            jump_target = today_key
                 else:
                     toggle_todo(node['data']['id'])
             delete_pending_idx = -1
@@ -1142,7 +1226,23 @@ def calculate_stats():
 
 def main(stdscr):
     curses.start_color(); curses.use_default_colors()
+    # Basic UI Colors
     for i, c in enumerate([curses.COLOR_WHITE, curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW], 1): curses.init_pair(i, c, -1)
+    
+    # Project Colors (IDs 30-39)
+    # Mapping roughly to: Red, Green, Yellow, Blue, Magenta, Cyan, White, Bright Red, Bright Green, Bright Yellow
+    project_colors = [
+        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, 
+        curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, 160, 46, 226
+    ]
+    # Fallback for standard terminals
+    std_colors = [curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW]
+    
+    for i in range(10):
+        c = project_colors[i] if curses.can_change_color() and i < len(project_colors) else std_colors[i]
+        try: curses.init_pair(30+i, c, -1)
+        except: curses.init_pair(30+i, std_colors[i], -1)
+
     curses.curs_set(0); view = 'HISTORY'
     while True:
         if view == 'HISTORY': view = show_history(stdscr)
