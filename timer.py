@@ -94,13 +94,38 @@ def add_todo(content, date_str, project, tags):
         if changed:
             save_config(cfg)
 
+def complete_matching_todo(project, content):
+    todos = load_todos()
+    changed = False
+    for t in todos:
+        if t.get('project') == project and t.get('content') == content and t.get('status') == 'pending':
+            t['status'] = 'done'
+            changed = True
+    if changed: save_todos(todos)
+
 def toggle_todo(todo_id):
     todos = load_todos()
+    target = None
     for t in todos:
         if t['id'] == todo_id:
+            target = t
             t['status'] = 'done' if t['status'] == 'pending' else 'pending'
             break
     save_todos(todos)
+    
+    # "Sanction as completed in 30min" logic
+    if target and target['status'] == 'done':
+        # Create a history entry
+        session = {
+            "project": target.get('project', 'General'),
+            "task": target.get('content', 'Unknown'),
+            "duration_minutes": 30,
+            "timestamp": datetime.now().isoformat(),
+            "status": "completed",
+            "manual_log": True
+        }
+        save_session(session)
+        # Update class progression if needed (handled by determining class on load)
 
 def delete_todo(todo_id):
     todos = load_todos()
@@ -198,6 +223,7 @@ def tick_timer():
     if remaining <= 0:
         SESSION['state'] = 'finished'; SESSION['show_colon'] = True
         save_session({"project": SESSION['project'], "task": SESSION['task'], "duration_minutes": SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "completed"})
+        complete_matching_todo(SESSION['project'], SESSION['task'])
 
 def start_new_session(project, task, duration_mins):
     SESSION['active'] = True; SESSION['state'] = 'running'
@@ -883,7 +909,20 @@ def main(stdscr):
             stdscr.erase(); h, w = stdscr.getmaxyx()
             p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects())
             if not p: view = 'HISTORY'; continue
-            t = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "TASK", get_unique_tasks(p))
+            
+            # Merge pending todos + history tasks
+            pending_todos = [t['content'] for t in load_todos() if t.get('project') == p and t.get('status') == 'pending']
+            history_tasks = get_unique_tasks(p)
+            # Remove duplicates from history that are in pending
+            history_tasks = [t for t in history_tasks if t not in pending_todos]
+            
+            # Display pending with a star indicator (visual only? No, just list them first)
+            # If we add visual indicator, fuzzy_select needs to return the clean value.
+            # For simplicity, we just list them first. The user knows they are likely todos.
+            
+            all_tasks = pending_todos + history_tasks
+            
+            t = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "TASK", all_tasks)
             if not t: view = 'HISTORY'; continue
             d = select_duration(stdscr)
             if not d: view = 'HISTORY'; continue
