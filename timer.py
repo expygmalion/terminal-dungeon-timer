@@ -804,7 +804,13 @@ def show_todo_list(stdscr):
                 st = "[x]" if item['status']=='done' else "[ ]"
                 col = curses.color_pair(2) if item['status']=='done' else 0
                 tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
-                safe_addstr(stdscr, 4+i, 4, f"  {st} {item['content']}{tags}", attr|col)
+                
+                # Check for today
+                prefix = "  "
+                if item.get('date') == datetime.now().strftime("%Y-%m-%d"):
+                    prefix = "★ "
+                    
+                safe_addstr(stdscr, 4+i, 4, f"{prefix}{st} {item['content']}{tags}", attr|col)
         
         safe_addstr(stdscr, h-1, 2, "[TAB] Switch View  [N] New  [Enter] Toggle  [D] Delete  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
