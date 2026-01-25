@@ -68,11 +68,12 @@ def load_todos():
 def save_todos(todos):
     with open(TODO_FILE, 'w') as f: json.dump(todos, f, indent=2)
 
-def add_todo(content, date_str, project, tags):
+def add_todo(content, date_str, project, tags, description=""):
     todos = load_todos()
     new_todo = {
         "id": str(uuid.uuid4()),
         "content": content,
+        "description": description,
         "date": date_str,
         "project": project if project else "General",
         "tags": tags,
@@ -393,15 +394,28 @@ def text_input(stdscr, y, x, prompt, default=""):
     curses.curs_set(1); inp = default
     while True:
         tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
-        draw_box(stdscr, y, x, 3, 40, prompt)
-        safe_addstr(stdscr, y+1, x+2, inp)
+        h, w = stdscr.getmaxyx()
+        
+        # Dynamic width
+        box_w = min(80, w - 4)
+        box_x = (w - box_w) // 2
+        
+        draw_box(stdscr, y, box_x, 3, box_w, prompt)
+        
+        # Scroll text
+        display_limit = box_w - 4
+        display_text = inp
+        if len(inp) > display_limit:
+            display_text = inp[-(display_limit):]
+            
+        safe_addstr(stdscr, y+1, box_x+2, display_text)
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1: time.sleep(0.05); continue
         if k in [10, 13]: curses.curs_set(0); return inp
         elif k == 27: curses.curs_set(0); return None
         elif k in [curses.KEY_BACKSPACE, 127, 8]: inp = inp[:-1]
-        elif 32 <= k <= 126 and len(inp) < 36: inp += chr(k)
+        elif 32 <= k <= 126 and len(inp) < 500: inp += chr(k)
 
 def fuzzy_select(stdscr, y, x, prompt, options):
     curses.curs_set(1); inp = ""; sel = 0
@@ -940,6 +954,9 @@ def add_new_todo_dialog(stdscr):
     if content is None: return
     if not content.strip(): return
     
+    desc = text_input(stdscr, h//2 - 4, w//2 - 20, "DESCRIPTION (Optional):")
+    if desc is None: desc = ""
+    
     today = datetime.now().strftime("%Y-%m-%d")
     d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "DATE (ESC to Cancel):", today)
     if d_str is None: return
@@ -978,7 +995,7 @@ def add_new_todo_dialog(stdscr):
     k = stdscr.getch()
     stdscr.timeout(50)
     if k in [ord('y'), ord('Y'), 10, 13]:
-        add_todo(content, d_str, p, tags)
+        add_todo(content, d_str, p, tags, desc)
         if new_proj_color or new_proj_tags or p not in projs:
              # Even if no color/tags, we need to save the new project entry
              add_project(p, new_proj_color, new_proj_tags)
@@ -1283,10 +1300,26 @@ def show_todo_list(stdscr):
                     indent = 9
                     item_str = f"{st} {item['content']}{tags}"
                 
+                # Truncation Logic
+                avail_w = w - indent - 1
+                if not is_sel and len(item_str) > avail_w:
+                    item_str = item_str[:avail_w-3] + "..."
+                
                 safe_addstr(stdscr, 4+i, indent, item_str, attr|col)
                 
             if ii == delete_pending_idx:
                 safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+        
+        # Detail View for Selected Item (if long)
+        if tree and 0 <= sel_idx < len(tree):
+            sel_node = tree[sel_idx]
+            if sel_node['type'] == 'item':
+                full_text = sel_node['data']['content']
+                desc = sel_node['data'].get('description', '')
+                if desc: full_text += f" | {desc}"
+                
+                if len(full_text) > w - 4:
+                    safe_addstr(stdscr, h-3, 2, f"FULL: {full_text}", curses.color_pair(3))
         
         nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
         safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [E/C] Exp/Col All  [I] Isolate  [N] New  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
