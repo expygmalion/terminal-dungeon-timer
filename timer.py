@@ -97,14 +97,18 @@ def toggle_todo(todo_id):
     for t in todos:
         if t['id'] == todo_id:
             target = t
-            t['status'] = 'done' if t['status'] == 'pending' else 'pending'
             break
-    save_todos(todos)
     
-    # "Sanction as completed in 30min" logic
-    if target and target['status'] == 'done':
-        # Create a history entry
+    if not target: return
+
+    if target['status'] == 'pending':
+        # Switch to DONE
+        target['status'] = 'done'
+        
+        # Create a history entry with ID for tracking
+        sess_id = str(uuid.uuid4())
         session = {
+            "id": sess_id,
             "project": target.get('project', 'General'),
             "task": target.get('content', 'Unknown'),
             "duration_minutes": 30,
@@ -113,7 +117,23 @@ def toggle_todo(todo_id):
             "manual_log": True
         }
         save_session(session)
-        # Update class progression if needed (handled by determining class on load)
+        target['last_session_id'] = sess_id
+        
+    else:
+        # Switch back to PENDING
+        target['status'] = 'pending'
+        
+        # Remove the auto-added session if it exists
+        sid = target.get('last_session_id')
+        if sid:
+            history = load_history()
+            new_history = [h for h in history if h.get('id') != sid]
+            if len(history) != len(new_history):
+                with open(DATA_FILE, 'w') as f: json.dump(new_history, f, indent=2)
+            # Remove the link
+            del target['last_session_id']
+            
+    save_todos(todos)
 
 def delete_todo(todo_id):
     todos = load_todos()
@@ -144,15 +164,30 @@ def add_project(name, color_id=None, tags=None):
     save_config(cfg)
 
 def delete_project(name):
+    if name == "General": return # Protect General
+    
+    # 1. Remove from Config
     cfg = load_config()
     if name in cfg['project_tags']:
-        # Also undo color
+        # Undo only covers config restoration, not data
         col = cfg.get('project_colors', {}).get(name)
         UNDO_STACK.append({'type': 'project', 'data': {'name': name, 'tags': cfg['project_tags'][name], 'color': col}})
         del cfg['project_tags'][name]
         if 'project_colors' in cfg and name in cfg['project_colors']:
             del cfg['project_colors'][name]
         save_config(cfg)
+    
+    # 2. Remove from Todos
+    todos = load_todos()
+    new_todos = [t for t in todos if t.get('project') != name]
+    if len(todos) != len(new_todos):
+        save_todos(new_todos)
+
+    # 3. Remove from History
+    history = load_history()
+    new_history = [h for h in history if h.get('project') != name]
+    if len(history) != len(new_history):
+        with open(DATA_FILE, 'w') as f: json.dump(new_history, f, indent=2)
 
 def restore_last_deleted_item():
     if not UNDO_STACK: return False
@@ -453,27 +488,39 @@ def show_settings(stdscr):
         elif k == curses.KEY_DOWN: sel = min(len(opts)-1, sel+1)
         elif k in [10, 13]:
             if sel == 0: # Manage Projects
-                projs = get_unique_projects() + ["+ ADD NEW PROJECT"]
-                p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT PROJECT", projs)
-                if p == "+ ADD NEW PROJECT":
-                    new_p = text_input(stdscr, h//2, w//2 - 20, "PROJECT NAME:")
-                    if new_p: add_project(new_p); cfg = load_config()
-                elif p:
-                    act = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {p}", ["Edit Tags", "Delete Project", "Cancel"])
-                    if act == "Edit Tags":
-                        curr_tags = cfg['project_tags'].get(p, [])
-                        val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
-                        if val is not None:
-                            cfg['project_tags'][p] = [t.strip() for t in val.split(',') if t.strip()]
-                    elif act == "Delete Project":
-                        msg = f" DELETE PROJECT '{p}'? (y/n) "
-                        safe_addstr(stdscr, h-1, 2, " " * (w-3))
-                        safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
-                        stdscr.refresh()
-                        stdscr.timeout(-1)
-                        if stdscr.getch() in [ord('y'), ord('Y')]:
-                            delete_project(p); cfg = load_config()
-                        stdscr.timeout(50)
+                while True:
+                    projs = get_unique_projects() + ["+ ADD NEW PROJECT"]
+                    p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT PROJECT", projs)
+                    if not p: break
+
+                    if p == "+ ADD NEW PROJECT":
+                        new_p = text_input(stdscr, h//2, w//2 - 20, "PROJECT NAME:")
+                        if new_p: add_project(new_p); cfg = load_config()
+                    elif p:
+                        act = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {p}", ["Edit Tags", "Edit Color", "Delete Project", "Cancel"])
+                        if act == "Edit Tags":
+                            curr_tags = cfg['project_tags'].get(p, [])
+                            val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
+                            if val is not None:
+                                cfg['project_tags'][p] = [t.strip() for t in val.split(',') if t.strip()]
+                                save_config(cfg)
+                        elif act == "Edit Color":
+                            # Current color
+                            c_id = cfg.get('project_colors', {}).get(p)
+                            new_col = select_color(stdscr, h//2 - 5, w//2 + 22)
+                            if new_col:
+                                if 'project_colors' not in cfg: cfg['project_colors'] = {}
+                                cfg['project_colors'][p] = new_col
+                                save_config(cfg)
+                        elif act == "Delete Project":
+                            msg = f" PERMANENTLY DELETE '{p}' + DATA? (y/n) "
+                            safe_addstr(stdscr, h-1, 2, " " * (w-3))
+                            safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
+                            stdscr.refresh()
+                            stdscr.timeout(-1)
+                            if stdscr.getch() in [ord('y'), ord('Y')]:
+                                delete_project(p); cfg = load_config()
+                            stdscr.timeout(50)
             elif sel == 1: # Manage Classes
                 cls_names = [c['name'] for c in cfg['classes']] + ["+ ADD NEW CLASS"]
                 c = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT CLASS", cls_names)
@@ -510,38 +557,88 @@ def show_settings(stdscr):
 def show_history(stdscr):
     idx = 0; scroll = 0; use_nerd = "--nerd-fonts" in sys.argv
     history = load_history(); last_load = time.time(); stdscr.timeout(50)
+    
+    view_mode = 'TODAY' # 'TODAY' or 'ALL'
+    current_date = datetime.now().date()
+    
     while True:
         tick_timer()
         if time.time() - last_load > 1.0: history = load_history(); last_load = time.time()
         stdscr.erase(); h, w = stdscr.getmaxyx()
+        
+        # Filter History based on Mode
+        display_history = []
+        if view_mode == 'ALL':
+            display_history = history
+            title_str = "ALL HISTORY"
+        else:
+            display_history = [
+                x for x in history 
+                if x.get('timestamp') and datetime.fromisoformat(x['timestamp']).date() == current_date
+            ]
+            title_str = f"HISTORY: {current_date.strftime('%a %d %b %Y').upper()}"
+
         tt, ty, ratio = calculate_stats()
         r_str = f"{ratio:.2f}x" if ratio != float('inf') else "INF"
-        safe_addstr(stdscr, 0, 2, f"TODAY: {tt:.1f}m | YEST: {ty:.1f}m | RATIO: {r_str}", curses.color_pair(2)|curses.A_BOLD)
+        
+        # Header
+        safe_addstr(stdscr, 0, 2, f"{title_str:<30} | TODAY: {tt:.1f}m | YEST: {ty:.1f}m", curses.color_pair(2)|curses.A_BOLD)
+        
+        # Table Header
         if use_nerd:
-            header = f"{ ' DATE':<19} | { ' PROJ':<12} | { ' TASK':<20} | { ' DUR':<5} | { ' STATUS':<12} | {' MULT'}"
+            header = f"{ ' TIME':<6} | { ' PROJECT':<12} | { ' TASK':<25} | { ' DUR':<5} | { ' STATUS':<10} | {' MULT'}"
         else:
-            header = f"{ 'DATE':<19} | {'PROJECT':<12} | {'TASK':<20} | {'DUR':<5} | {'STATUS':<12} | {'MULT'}"
+            header = f"{ 'TIME':<6} | {'PROJECT':<12} | {'TASK':<25} | {'DUR':<5} | {'STATUS':<10} | {'MULT'}"
         safe_addstr(stdscr, 2, 2, header, curses.color_pair(3)); safe_addstr(stdscr, 3, 2, "-"*min(len(header), w-2), curses.color_pair(3))
+        
         list_h = max(1, h - 6)
-        if not history: idx = 0
-        else: idx = max(0, min(idx, len(history) - 1))
+        if not display_history: idx = 0
+        else: idx = max(0, min(idx, len(display_history) - 1))
+        
         if idx < scroll: scroll = idx
         elif idx >= scroll + list_h: scroll = idx - list_h + 1
-        for i in range(list_h):
-            ii = scroll + i
-            if ii >= len(history): break
-            it = history[ii]; dt = it.get('timestamp','')[:19]; st = "SUCCESS" if it.get('status')=='completed' else "TERM"
-            dm = f"{it.get('duration_minutes',0)}m" if st=="SUCCESS" else f"{int(it.get('actual_duration_seconds',0)//60)}m"
-            if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
-            attr = curses.color_pair(1)|curses.A_REVERSE if ii==idx else 0
-            safe_addstr(stdscr, 4+i, 2, f"{dt:<19} | {it.get('project','-')[:12]:<12} | {it.get('task','-')[:20]:<20} | {dm:<5} | {st:<12} | {'1.0x' if st.endswith('SUCCESS') else '-'}", attr)
-        safe_addstr(stdscr, h-1, 2, "[N] New  [L] Todo  [D] Del  [H] Heat  [W] Week  [R] Raid  [S] Set  [I] Info  [Q] Quit", curses.color_pair(4))
+        
+        if not display_history:
+            safe_addstr(stdscr, 4, 2, "No sessions found for this period.", curses.A_DIM)
+        else:
+            for i in range(list_h):
+                ii = scroll + i
+                if ii >= len(display_history): break
+                it = display_history[ii]; st = "SUCCESS" if it.get('status')=='completed' else "TERM"
+                dm = f"{it.get('duration_minutes',0)}m" if st=="SUCCESS" else f"{int(it.get('actual_duration_seconds',0)//60)}m"
+                
+                # Extract HH:MM
+                ts = it.get('timestamp', '')
+                tm_str = ts[11:16] if len(ts) >= 16 else "--:--"
+                
+                if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
+                attr = curses.color_pair(1)|curses.A_REVERSE if ii==idx else 0
+                
+                # Row content
+                row_str = f"{tm_str:<6} | {it.get('project','-')[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {'1.0x' if st.endswith('SUCCESS') else '-'}"
+                safe_addstr(stdscr, 4+i, 2, row_str, attr)
+        
+        # Footer Help
+        nav_help = "[TAB] View  [[] Day -  []] Day +  [N] New  [L] Todo  [D] Del"
+        safe_addstr(stdscr, h-1, 2, f"{nav_help}  [H] Heat  [W] Week  [R] Raid  [S] Set  [Q] Quit", curses.color_pair(4))
+        
         draw_pip_timer(stdscr); stdscr.refresh(); k = stdscr.getch()
         if k == -1: continue
         nav = check_nav_keys(k); 
         if nav: return nav
-        if k in [ord('n'), ord('N')]: return 'NEW'
-        elif k in [ord('d'), ord('D')] and history: 
+        
+        if k == 9: # TAB
+            view_mode = 'ALL' if view_mode == 'TODAY' else 'TODAY'
+            idx = 0; scroll = 0
+        elif k in [ord('['), curses.KEY_SLEFT]: # Prev Day
+            current_date -= timedelta(days=1)
+            view_mode = 'TODAY'; idx = 0; scroll = 0
+        elif k in [ord(']'), curses.KEY_SRIGHT]: # Next Day
+            if current_date < datetime.now().date():
+                current_date += timedelta(days=1)
+                view_mode = 'TODAY'; idx = 0; scroll = 0
+        elif k in [ord('n'), ord('N')]: return 'NEW'
+        elif k in [ord('d'), ord('D')] and display_history: 
             msg = " DELETE SESSION? (y/n) "
             safe_addstr(stdscr, h-1, 2, " " * (w-3))
             safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
@@ -550,7 +647,13 @@ def show_history(stdscr):
             conf_k = stdscr.getch()
             stdscr.timeout(50)
             if conf_k in [ord('y'), ord('Y')]:
-                delete_session(idx); history = load_history()
+                target_item = display_history[idx]
+                real_idx = -1
+                for ri, rh in enumerate(history):
+                    if rh == target_item:
+                        real_idx = ri; break
+                if real_idx != -1:
+                    delete_session(real_idx); history = load_history()
         elif k in [ord('q'), ord('Q')]: return 'QUIT'
         elif k == curses.KEY_UP: idx -= 1
         elif k == curses.KEY_DOWN: idx += 1
@@ -560,8 +663,14 @@ def show_timer_view(stdscr):
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx()
         if not SESSION['active']: return 'HISTORY'
+        
+        cfg = load_config()
+        p_color_id = cfg.get('project_colors', {}).get(SESSION['project'], 0)
+        p_attr = curses.color_pair(p_color_id) if p_color_id else 0
+        
         draw_box(stdscr, 1, 2, 6, max(40, w - 35), "DETAILS")
-        safe_addstr(stdscr, 2, 4, f"PROJECT: {SESSION['project']}"); safe_addstr(stdscr, 3, 4, f"TASK:    {SESSION['task']}")
+        safe_addstr(stdscr, 2, 4, f"PROJECT: {SESSION['project']}", p_attr|curses.A_BOLD)
+        safe_addstr(stdscr, 3, 4, f"TASK:    {SESSION['task']}")
         draw_box(stdscr, 1, max(40, w - 35) + 3, 6, 30, "SYSTEM"); safe_addstr(stdscr, 3, max(40, w - 35) + 5, f"{datetime.now().strftime('%H:%M:%S')}")
         elapsed = SESSION['elapsed_before_pause'] + (time.time()-SESSION['start_time'] if SESSION['state']=='running' else 0)
         rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
@@ -739,7 +848,14 @@ def show_daily_raid(stdscr):
                 attr = curses.color_pair(12)|curses.A_REVERSE if idx==sel else col
                 safe_addstr(stdscr, 5+i, 2, f"│ {pre}[{mk}] {tm}: {tk}", attr)
         if todays and sel < len(todays):
-            ss = todays[sel]; sy = 5; x = split+2; safe_addstr(stdscr, sy, x, f"QUEST: {ss.get('project','-')}", curses.color_pair(12)|curses.A_BOLD); safe_addstr(stdscr, sy+1, x, f"OBJ:   {ss.get('task','-')}", curses.color_pair(1))
+            ss = todays[sel]; sy = 5; x = split+2
+            
+            cfg = load_config()
+            p_color_id = cfg.get('project_colors', {}).get(ss.get('project'), 0)
+            p_attr = curses.color_pair(p_color_id) if p_color_id else curses.color_pair(12)
+            
+            safe_addstr(stdscr, sy, x, f"QUEST: {ss.get('project','-')}", p_attr|curses.A_BOLD)
+            safe_addstr(stdscr, sy+1, x, f"OBJ:   {ss.get('task','-')}", curses.color_pair(1))
             du = ss.get('duration_minutes',0) if ss.get('status')=='completed' else ss.get('actual_duration_seconds',0)/60
             safe_addstr(stdscr, sy+3, x, f"DURATION: {int(du)} min", curses.color_pair(11)|curses.A_BOLD); safe_addstr(stdscr, sy+5, x, "LOOT DROPS:", curses.color_pair(12)|curses.A_UNDERLINE)
             loot = "█ " * int(du/5); safe_addstr(stdscr, sy+6, x, loot if loot else "░", curses.color_pair(10)|curses.A_BOLD)
@@ -834,6 +950,7 @@ def add_new_todo_dialog(stdscr):
         new_proj_tags = [t.strip() for t in p_tags_str.split(',')] if p_tags_str else []
         
         # Select Color for new project
+        curses.flushinp()
         new_proj_color = select_color(stdscr, h//2 - 5, w//2 + 22)
     
     tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TASK TAGS (ESC to Cancel):")
@@ -841,145 +958,26 @@ def add_new_todo_dialog(stdscr):
     tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
     
     # Confirmation
-    msg = " SAVE TASK? (y/n) "
+    msg = " SAVE TASK? (y/n/Enter) "
     safe_addstr(stdscr, h-1, 2, " " * (w-3))
     safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
     stdscr.refresh()
     stdscr.timeout(-1)
     k = stdscr.getch()
     stdscr.timeout(50)
-    if k in [ord('y'), ord('Y')]:
+    if k in [ord('y'), ord('Y'), 10, 13]:
         add_todo(content, d_str, p, tags)
         if new_proj_color or new_proj_tags or p not in projs:
              # Even if no color/tags, we need to save the new project entry
              add_project(p, new_proj_color, new_proj_tags)
+        return p
+    return None
 
-def show_backlog_view(stdscr):
-    sel_idx = -1
-    scroll_idx = 0
-    
-    while True:
-        tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
-        todos = load_todos()
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        
-        # Filter for Past AND Today items (Review Mode)
-        # Include items <= today
-        backlog_todos = [t for t in todos if t.get('date', '9999-99-99') <= today_str]
-        
-        tree = []
-        groups = {}
-        for t in backlog_todos:
-            d = t.get('date', 'Unknown')
-            if d not in groups: groups[d] = []
-            groups[d].append(t)
-        
-        # Sort by date descending (Newest first)
-        sorted_keys = sorted(groups.keys(), reverse=True)
-        
-        # Build flattened tree
-        selectable_indices = []
-        curr_row = 0
-        
-        for k in sorted_keys:
-            items = groups[k]
-            # Add Header
-            done_c = sum(1 for i in items if i['status']=='done')
-            tree.append({'type': 'group', 'key': k, 'done': done_c, 'total': len(items)})
-            curr_row += 1
-            
-            # Add Items
-            for item in items:
-                tree.append({'type': 'item', 'data': item})
-                if item['status'] == 'pending':
-                    selectable_indices.append(curr_row)
-                curr_row += 1
-        
-        # Header
-        safe_addstr(stdscr, 1, 2, "  TASK REVIEW (Past + Today)  ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
-        safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(5))
-        
-        list_h = h - 5
-        
-        # Auto-select first selectable if selection invalid
-        if selectable_indices and (sel_idx < 0 or sel_idx not in selectable_indices):
-            # Try to find nearest or default to first
-            if sel_idx < 0: sel_idx = selectable_indices[0]
-            else:
-                # Find closest match
-                sel_idx = min(selectable_indices, key=lambda x: abs(x-sel_idx))
-        
-        if not selectable_indices: sel_idx = -1
-        
-        # Scroll logic
-        if sel_idx >= 0:
-            if sel_idx < scroll_idx: scroll_idx = sel_idx
-            elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
-        
-        # Render
-        if not tree:
-            safe_addstr(stdscr, 4, 4, "No items found for review!", curses.A_DIM)
-        else:
-            for i in range(list_h):
-                ii = scroll_idx + i
-                if ii >= len(tree): break
-                node = tree[ii]
-                is_sel = (ii == sel_idx)
-                
-                if node['type'] == 'group':
-                    k = node['key']
-                    try:
-                        dt = datetime.strptime(k, "%Y-%m-%d")
-                        lbl = dt.strftime("%a %d/%b/%Y").upper()
-                        if k == today_str: lbl = f"★ {lbl}"
-                    except: lbl = k
-                    pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                    safe_addstr(stdscr, 4+i, 2, f"[-] {lbl:<20} {pct:>3}% DONE", curses.color_pair(4)|curses.A_BOLD)
-                else:
-                    item = node['data']
-                    st = "[x]" if item['status']=='done' else "[ ]"
-                    
-                    if item['status'] == 'done':
-                        attr = curses.A_DIM
-                        col = 0
-                    else:
-                        attr = curses.A_REVERSE if is_sel else 0
-                        col = curses.color_pair(5) # Red for pending
-                        
-                    tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
-                    safe_addstr(stdscr, 4+i, 4, f"  {st} {item['content']}{tags}", attr|col)
 
-        safe_addstr(stdscr, h-1, 2, "[Enter] Complete  [B/ESC] Return", curses.color_pair(4))
-        stdscr.refresh()
-        stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
-        
-        if k == -1: time.sleep(0.05); continue
-        
-        nav = check_nav_keys(k)
-        if nav: return nav
-        
-        if k in [ord('b'), ord('B'), 27]: return 'TODO'
-        
-        if not selectable_indices: continue
-        
-        if k in [curses.KEY_DOWN, ord('j')]:
-            # Find next selectable index > sel_idx
-            next_idxs = [x for x in selectable_indices if x > sel_idx]
-            if next_idxs: sel_idx = next_idxs[0]
-        elif k in [curses.KEY_UP, ord('k')]:
-            # Find prev selectable index < sel_idx
-            prev_idxs = [x for x in selectable_indices if x < sel_idx]
-            if prev_idxs: sel_idx = prev_idxs[-1]
-        elif k in [10, 13]: # Enter
-             if 0 <= sel_idx < len(tree) and tree[sel_idx]['type'] == 'item':
-                 toggle_todo(tree[sel_idx]['data']['id'])
-                 # Don't move selection immediately, let next render loop handle state change (it will become unselectable)
-                 # But we might want to auto-jump to next?
-                 # Let's let the loop re-calculate selectable_indices. 
-                 # If current sel_idx becomes invalid (completed), the auto-select logic at top of loop will pick nearest.
 
 def show_todo_list(stdscr):
     mode = 'DAILY'
+    backlog_active = False
     expanded = set()
     sel_idx = 0
     scroll_idx = 0
@@ -988,11 +986,17 @@ def show_todo_list(stdscr):
     
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
-        todos = load_todos()
+        all_todos = load_todos()
         today_str = datetime.now().strftime("%Y-%m-%d")
         cfg = load_config()
         p_colors = cfg.get('project_colors', {})
         
+        # Apply Backlog Filter
+        if backlog_active:
+            todos = [t for t in all_todos if t.get('date', '9999-99-99') <= today_str]
+        else:
+            todos = all_todos
+
         tree = []
         if mode == 'DAILY':
             groups = {}
@@ -1057,10 +1061,17 @@ def show_todo_list(stdscr):
         tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
         tabs += f" [PROJECT] " if mode=='PROJECT' else "  PROJECT  "
         safe_addstr(stdscr, 1, 2, tabs, curses.color_pair(3)|curses.A_BOLD)
+        
+        # Backlog Indicator
+        if backlog_active:
+            safe_addstr(stdscr, 1, 25, " [BACKLOG VIEW] ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+            
         safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(3))
         
         list_h = h - 5
-        if not tree: sel_idx = 0
+        if not tree: 
+            sel_idx = 0
+            safe_addstr(stdscr, 4, 4, "No tasks found.", curses.A_DIM)
         else: sel_idx = max(0, min(sel_idx, len(tree)-1))
         
         if sel_idx < scroll_idx: scroll_idx = sel_idx
@@ -1073,6 +1084,16 @@ def show_todo_list(stdscr):
             is_sel = (ii == sel_idx)
             attr = curses.A_REVERSE if is_sel else 0
             
+            # Margin Asterisk Logic
+            show_asterisk = False
+            if node['type'] == 'item':
+                if node['data']['status'] == 'pending': show_asterisk = True
+            elif node['type'] in ['group', 'date_group']:
+                if node['done'] < node['total']: show_asterisk = True
+            
+            if show_asterisk:
+                safe_addstr(stdscr, 4+i, 0, "\U0001F7BA", curses.color_pair(5))
+
             # Render Logic
             if node['type'] == 'group': # DAILY Mode Header
                 k = node['key']
@@ -1084,7 +1105,13 @@ def show_todo_list(stdscr):
                 except: lbl = k
                 pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
                 icon = "[-]" if k in expanded else "[+]"
-                safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|curses.color_pair(4))
+                
+                # Check for overdue pending tasks
+                is_past = k < today_str
+                has_pending = node['done'] < node['total']
+                header_attr = curses.color_pair(5)|curses.A_BOLD if (is_past and has_pending) else curses.color_pair(4)
+                
+                safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|header_attr)
             
             elif node['type'] == 'project': # PROJECT Mode Top Level
                 k = node['key']
@@ -1119,13 +1146,25 @@ def show_todo_list(stdscr):
                 line_char = "  ├─" if not node['is_last'] else "  └─"
                 if is_backlog: line_char = "  ├╌" if not node['is_last'] else "  └╌"
                 
+                date_attr = curses.color_pair(5)|curses.A_BOLD if is_backlog else curses.color_pair(4)
+                
                 safe_addstr(stdscr, 4+i, 2, f"{line_char}", col)
-                safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|curses.color_pair(4))
+                safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|date_attr)
 
             elif node['type'] == 'item':
                 item = node['data']
                 st = "[x]" if item['status']=='done' else "[ ]"
-                col = curses.color_pair(2) if item['status']=='done' else 0
+                
+                # Determine Color
+                is_overdue = (item.get('date', '9999-99-99') < today_str) and (item['status'] == 'pending')
+                
+                if item['status'] == 'done':
+                    col = curses.color_pair(2) # Green
+                elif is_overdue:
+                    col = curses.color_pair(5) # Red for overdue
+                else:
+                    col = 0 # Default
+
                 tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
                 
                 prefix = ""
@@ -1133,19 +1172,19 @@ def show_todo_list(stdscr):
                 
                 if mode == 'DAILY':
                     indent = 4
-                    # Use Project Color for task text in Daily View
-                    p_name = item.get('project')
-                    if p_name and p_name != "General":
+                    # Use Project Color for task text in Daily View (if not overdue/done)
+                    p_name = item.get('project', 'General')
+                    if p_name and p_name != "General" and not is_overdue and item['status'] != 'done':
                          col_id = p_colors.get(p_name, 0)
-                         if col_id and not item['status']=='done':
+                         if col_id:
                              try: col = curses.color_pair(col_id)
                              except: pass
                     
                     # Backlog dashes
-                    if item.get('date', '9999') < today_str and item['status'] == 'pending':
-                         prefix = "╌╌ "
-                    else:
-                         prefix = "   "
+                    if is_overdue: prefix = "╌╌ "
+                    else: prefix = "   "
+                    
+                    item_str = f"{prefix}{st} {p_name}: {item['content']}{tags}"
                          
                 else: # PROJECT Mode
                     indent = 6
@@ -1154,28 +1193,6 @@ def show_todo_list(stdscr):
                     col_id = p_colors.get(p_name, 3)
                     try: tree_col = curses.color_pair(col_id)
                     except: tree_col = curses.color_pair(3)
-                    
-                    # Vertical connector from Date down to this task?
-                    # No, we need vertical from Project down to next Date group.
-                    # If the parent DATE group is NOT the last one, we need a vertical bar |
-                    # passing through.
-                    
-                    # "     " for spacing under Project
-                    # "  |  " if parent (date) is not last? NO.
-                    # Parent is Project. Date is child. Task is Grandchild.
-                    # Project
-                    #   ├─ Date 1
-                    #   │   └─ Task
-                    #   └─ Date 2
-                    
-                    # If this task belongs to Date 1, and Date 1 is NOT last, 
-                    # we need a vertical bar at x=2 connecting Date 1 to Date 2.
-                    
-                    # Prefix Construction:
-                    # Col 0-1: "  "
-                    # Col 2: "│" if Date group (parent) is NOT last, else " "
-                    # Col 3-4: "  "
-                    # Col 5-6: "├─" or "└─"
                     
                     v_bar = "│" if not node.get('parent_last') else " "
                     branch = "├" if not node.get('is_last') else "└"
@@ -1189,14 +1206,15 @@ def show_todo_list(stdscr):
                     
                     safe_addstr(stdscr, 4+i, 2, line_str, tree_col)
                     indent = 9
-                    prefix = ""
+                    item_str = f"{st} {item['content']}{tags}"
                 
-                safe_addstr(stdscr, 4+i, indent, f"{prefix}{st} {item['content']}{tags}", attr|col)
+                safe_addstr(stdscr, 4+i, indent, item_str, attr|col)
                 
             if ii == delete_pending_idx:
                 safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
         
-        safe_addstr(stdscr, h-1, 2, "[TAB] View  [N] New  [Enter] Toggle  [B] Backlog  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
+        nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
+        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [N] New  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
@@ -1206,14 +1224,15 @@ def show_todo_list(stdscr):
         if nav and nav != 'TODO': return nav
         
         if k in [ord('b'), ord('B')]:
-            res = show_backlog_view(stdscr)
-            if res != 'TODO': return res
+            backlog_active = not backlog_active
+            expanded = set()
+            sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
             
         if k in [ord('u'), ord('U')]:
              restore_last_deleted_item()
              delete_pending_idx = -1
         
-        if k == 9:
+        if k == 9: # TAB
             mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
             expanded = set()
             sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
@@ -1237,7 +1256,12 @@ def show_todo_list(stdscr):
                     toggle_todo(node['data']['id'])
             delete_pending_idx = -1
         elif k in [ord('n'), ord('N')]:
-            add_new_todo_dialog(stdscr); delete_pending_idx = -1
+            new_p = add_new_todo_dialog(stdscr); delete_pending_idx = -1
+            if new_p:
+                mode = 'PROJECT'
+                expanded.add(new_p)
+                expanded.add(f"{new_p}|{today_str}")
+                jump_target = f"{new_p}|{today_str}"
         elif k in [ord('d'), ord('D')]:
             if tree:
                 if delete_pending_idx == sel_idx:
@@ -1267,18 +1291,37 @@ def main(stdscr):
     for i, c in enumerate([curses.COLOR_WHITE, curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW], 1): curses.init_pair(i, c, -1)
     
     # Project Colors (IDs 30-39)
-    # Mapping roughly to: Red, Green, Yellow, Blue, Magenta, Cyan, White, Bright Red, Bright Green, Bright Yellow
-    project_colors = [
-        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, 
-        curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, 160, 46, 226
+    # Use Fixed Xterm-256 Color Codes to bypass terminal themes
+    # These indices (16-255) are standard and usually not overridden by color schemes.
+    # Order: Red, Green, Yellow, Blue, Magenta, Cyan, White, Orange, Lime, Violet
+    xterm_256_map = [
+        196, # 0: Red (Bright)
+        46,  # 1: Green (Bright)
+        226, # 2: Yellow (Bright)
+        39,  # 3: Blue (Deep Sky)
+        201, # 4: Magenta (Hot Pink)
+        51,  # 5: Cyan (Electric)
+        231, # 6: White (Bright)
+        208, # 7: Orange
+        118, # 8: Lime
+        129  # 9: Violet
     ]
-    # Fallback for standard terminals
-    std_colors = [curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW]
+    
+    # Fallback standard colors for terminals that might not support 256 colors (e.g. very old ones)
+    std_colors = [
+        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, 
+        curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, 
+        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_MAGENTA
+    ]
     
     for i in range(10):
-        c = project_colors[i] if curses.can_change_color() and i < len(project_colors) else std_colors[i]
-        try: curses.init_pair(30+i, c, -1)
-        except: curses.init_pair(30+i, std_colors[i], -1)
+        pair_id = 30 + i
+        # Try to use 256 colors if the terminal supports them (COLORS > 200)
+        # Most modern terminals (Alacritty, Kitty, iTerm, Gnome) support 256.
+        if curses.COLORS > 200:
+            curses.init_pair(pair_id, xterm_256_map[i], -1)
+        else:
+            curses.init_pair(pair_id, std_colors[i], -1)
 
     curses.curs_set(0); view = 'HISTORY'
     while True:
