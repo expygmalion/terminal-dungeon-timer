@@ -557,6 +557,7 @@ def show_settings(stdscr):
 def show_history(stdscr):
     idx = 0; scroll = 0; use_nerd = "--nerd-fonts" in sys.argv
     history = load_history(); last_load = time.time(); stdscr.timeout(50)
+    cfg = load_config()
     
     view_mode = 'TODAY' # 'TODAY' or 'ALL'
     current_date = datetime.now().date()
@@ -598,9 +599,11 @@ def show_history(stdscr):
         if idx < scroll: scroll = idx
         elif idx >= scroll + list_h: scroll = idx - list_h + 1
         
+        # Table Content
         if not display_history:
             safe_addstr(stdscr, 4, 2, "No sessions found for this period.", curses.A_DIM)
         else:
+            p_colors = cfg.get('project_colors', {})
             for i in range(list_h):
                 ii = scroll + i
                 if ii >= len(display_history): break
@@ -611,11 +614,20 @@ def show_history(stdscr):
                 ts = it.get('timestamp', '')
                 tm_str = ts[11:16] if len(ts) >= 16 else "--:--"
                 
+                # Project Color logic
+                p_name = it.get('project', '-')
+                p_color_id = p_colors.get(p_name, 0)
+                
                 if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
-                attr = curses.color_pair(1)|curses.A_REVERSE if ii==idx else 0
+                
+                # Selection vs Row attribute
+                if ii == idx:
+                    attr = curses.color_pair(p_color_id or 1) | curses.A_REVERSE
+                else:
+                    attr = curses.color_pair(p_color_id) if p_color_id else 0
                 
                 # Row content
-                row_str = f"{tm_str:<6} | {it.get('project','-')[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {'1.0x' if st.endswith('SUCCESS') else '-'}"
+                row_str = f"{tm_str:<6} | {p_name[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {'1.0x' if st.endswith('SUCCESS') else '-'}"
                 safe_addstr(stdscr, 4+i, 2, row_str, attr)
         
         # Footer Help
@@ -1086,13 +1098,30 @@ def show_todo_list(stdscr):
             
             # Margin Asterisk Logic
             show_asterisk = False
+            ast_color = 5 # Default Red
+            
             if node['type'] == 'item':
-                if node['data']['status'] == 'pending': show_asterisk = True
-            elif node['type'] in ['group', 'date_group']:
-                if node['done'] < node['total']: show_asterisk = True
+                if node['data']['status'] == 'pending': 
+                    show_asterisk = True
+                    p_name = node['data'].get('project', 'General')
+                    ast_color = p_colors.get(p_name, 5)
+            elif node['type'] == 'project':
+                if node['done'] < node['total']:
+                    show_asterisk = True
+                    ast_color = p_colors.get(node['key'], 5)
+            elif node['type'] == 'date_group':
+                if node['done'] < node['total']:
+                    show_asterisk = True
+                    ast_color = p_colors.get(node['parent'], 5)
+            elif node['type'] == 'group': # Daily View Date
+                if node['done'] < node['total']:
+                    show_asterisk = True
+                    ast_color = 5 # Keep Red for overdue days
             
             if show_asterisk:
-                safe_addstr(stdscr, 4+i, 0, "\U0001F7BA", curses.color_pair(5))
+                try: col_pair = curses.color_pair(ast_color)
+                except: col_pair = curses.color_pair(5)
+                safe_addstr(stdscr, 4+i, 0, "\U0001F7BA", col_pair)
 
             # Render Logic
             if node['type'] == 'group': # DAILY Mode Header
