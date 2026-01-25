@@ -990,6 +990,8 @@ def add_new_todo_dialog(stdscr):
 def show_todo_list(stdscr):
     mode = 'DAILY'
     backlog_active = False
+    isolation_filter = None # Key to filter by
+    isolation_type = None   # 'project', 'date', 'date_group'
     expanded = set()
     sel_idx = 0
     scroll_idx = 0
@@ -1003,11 +1005,23 @@ def show_todo_list(stdscr):
         cfg = load_config()
         p_colors = cfg.get('project_colors', {})
         
-        # Apply Backlog Filter
-        if backlog_active:
-            todos = [t for t in all_todos if t.get('date', '9999-99-99') <= today_str]
+        # 1. Apply Isolation Filter
+        if isolation_filter:
+            if isolation_type == 'project':
+                todos = [t for t in all_todos if t.get('project') == isolation_filter]
+            elif isolation_type == 'date': # Daily View Date
+                todos = [t for t in all_todos if t.get('date') == isolation_filter]
+            elif isolation_type == 'date_group': # Project|Date
+                p_name, d_val = isolation_filter.split('|')
+                todos = [t for t in all_todos if t.get('project') == p_name and t.get('date') == d_val]
+            else:
+                todos = all_todos
         else:
             todos = all_todos
+
+        # 2. Apply Backlog Filter (on top of isolation)
+        if backlog_active:
+            todos = [t for t in todos if t.get('date', '9999-99-99') <= today_str]
 
         tree = []
         if mode == 'DAILY':
@@ -1021,7 +1035,10 @@ def show_todo_list(stdscr):
                 items = groups[k]
                 done_c = sum(1 for i in items if i['status']=='done')
                 tree.append({'type': 'group', 'key': k, 'items': items, 'done': done_c, 'total': len(items)})
-                if k in expanded:
+                # In isolation mode, auto-expand the single root logic or just respect expanded
+                # If isolated by date, we only have one group, so auto-expand it?
+                # Let's respect standard expanded logic but maybe default expand if isolated?
+                if k in expanded or (isolation_filter and isolation_type == 'date'):
                     for item in items:
                         tree.append({'type': 'item', 'data': item, 'parent': k})
         else: # PROJECT MODE (Restructured: Project -> Date -> Task)
@@ -1041,7 +1058,10 @@ def show_todo_list(stdscr):
                 is_last_proj = (i_p == len(sorted_projs) - 1)
                 tree.append({'type': 'project', 'key': p, 'done': done_p, 'total': len(p_items), 'is_last': is_last_proj})
                 
-                if p in expanded:
+                # Auto-expand if isolated by project
+                is_isolated_proj = (isolation_filter == p and isolation_type == 'project')
+                
+                if p in expanded or is_isolated_proj:
                     # Group by Date inside Project
                     d_groups = {}
                     for t in p_items:
@@ -1064,7 +1084,10 @@ def show_todo_list(stdscr):
                              sel_idx = len(tree) - 1
                              jump_target = None
                         
-                        if d_key in expanded:
+                        # Auto-expand if isolated by specific date_group
+                        is_isolated_dg = (isolation_filter == d_key and isolation_type == 'date_group')
+                        
+                        if d_key in expanded or is_isolated_dg:
                             for i_t, item in enumerate(d_items):
                                 is_last_item = (i_t == len(d_items) - 1)
                                 tree.append({'type': 'item', 'data': item, 'parent': d_key, 'is_last': is_last_item, 'parent_last': is_last_date})
@@ -1075,8 +1098,27 @@ def show_todo_list(stdscr):
         safe_addstr(stdscr, 1, 2, tabs, curses.color_pair(3)|curses.A_BOLD)
         
         # Backlog Indicator
+        indicator_x = 25
         if backlog_active:
-            safe_addstr(stdscr, 1, 25, " [BACKLOG VIEW] ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+            safe_addstr(stdscr, 1, indicator_x, " [BACKLOG VIEW] ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+            indicator_x += 17
+            
+        # Isolation Indicator
+        if isolation_filter:
+            iso_label = isolation_filter
+            iso_col = 0
+            if isolation_type == 'project':
+                iso_col = p_colors.get(isolation_filter, 0)
+            elif isolation_type == 'date_group':
+                p_part = isolation_filter.split('|')[0]
+                iso_col = p_colors.get(p_part, 0)
+                iso_label = p_part # Shorten display
+            
+            # Use project color reversed (Background color + Dark Text ideally, or just Reverse)
+            # Standard curses doesn't easily do "Dark Text on Bright BG" without defining new pairs.
+            # We will use A_REVERSE with the project color.
+            iso_attr = curses.color_pair(iso_col)|curses.A_REVERSE if iso_col else curses.A_REVERSE
+            safe_addstr(stdscr, 1, indicator_x, f" [ISOLATED: {iso_label}] ", iso_attr|curses.A_BOLD)
             
         safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(3))
         
@@ -1133,7 +1175,7 @@ def show_todo_list(stdscr):
                     else: lbl = f"  {lbl}"
                 except: lbl = k
                 pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                icon = "[-]" if k in expanded else "[+]"
+                icon = "[-]" if k in expanded or (isolation_filter and isolation_type=='date') else "[+]"
                 
                 # Check for overdue pending tasks
                 is_past = k < today_str
@@ -1145,7 +1187,11 @@ def show_todo_list(stdscr):
             elif node['type'] == 'project': # PROJECT Mode Top Level
                 k = node['key']
                 pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                icon = "[-]" if k in expanded else "[+]"
+                
+                # Auto-open if isolated
+                is_open = k in expanded or (isolation_filter == k and isolation_type == 'project')
+                icon = "[-]" if is_open else "[+]"
+                
                 # Project Color
                 col_id = p_colors.get(k, 3) # Default Blue
                 try: col = curses.color_pair(col_id)
@@ -1243,19 +1289,53 @@ def show_todo_list(stdscr):
                 safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
         
         nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
-        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [N] New  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [E/C] Exp/Col All  [I] Isolate  [N] New  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
         if k == -1: time.sleep(0.05); continue
         
         nav = check_nav_keys(k)
-        if nav and nav != 'TODO': return nav
+        if nav and nav != 'TODO' and nav != 'INFO': return nav
+        
+        if k in [ord('e'), ord('E')]:
+            if mode == 'DAILY':
+                expanded.update(set(t.get('date', 'Unknown') for t in todos))
+            else:
+                for t in todos:
+                    p = t.get('project', 'General') or 'General'
+                    expanded.add(p)
+                    expanded.add(f"{p}|{t.get('date', 'Unknown')}")
+        elif k in [ord('c'), ord('C')]:
+            expanded.clear()
         
         if k in [ord('b'), ord('B')]:
             backlog_active = not backlog_active
+            # Don't clear isolation, just re-apply backlog filtering
             expanded = set()
             sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
+            
+        if k in [ord('i'), ord('I')]:
+            if tree:
+                node = tree[sel_idx]
+                if node['type'] == 'group': # Date in Daily
+                    if isolation_filter == node['key']: # Toggle off
+                        isolation_filter = None; isolation_type = None
+                    else:
+                        isolation_filter = node['key']; isolation_type = 'date'
+                elif node['type'] == 'project':
+                    if isolation_filter == node['key']:
+                        isolation_filter = None; isolation_type = None
+                    else:
+                        isolation_filter = node['key']; isolation_type = 'project'
+                elif node['type'] == 'date_group':
+                    if isolation_filter == node['key']:
+                        isolation_filter = None; isolation_type = None
+                    else:
+                        isolation_filter = node['key']; isolation_type = 'date_group'
+                
+                # Reset view state slightly
+                sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
             
         if k in [ord('u'), ord('U')]:
              restore_last_deleted_item()
@@ -1302,7 +1382,12 @@ def show_todo_list(stdscr):
                      node = tree[sel_idx]
                      if node['type'] == 'item':
                          delete_pending_idx = sel_idx
-        elif k == 27: return 'HISTORY'
+        elif k == 27:
+            if isolation_filter:
+                isolation_filter = None; isolation_type = None
+                sel_idx = 0; scroll_idx = 0
+            else:
+                return 'HISTORY'
 
 def calculate_stats():
     history = load_history(); today = datetime.now().date(); yest = today - timedelta(days=1); tt = 0; ty = 0
