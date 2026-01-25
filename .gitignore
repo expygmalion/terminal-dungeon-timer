@@ -2,3 +2,5 @@ __pycache__/
 timer_history.json
 *.pyc
 GEMINI.md
+timer_config.json
+todo_data.json
