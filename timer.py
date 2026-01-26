@@ -58,6 +58,16 @@ SESSION = {
 
 UNDO_STACK = []
 
+TODO_STATE = {
+    'expanded_daily': set(),
+    'expanded_project': set(),
+    'mode': 'DAILY',
+    'backlog_active': False,
+    'isolation_filter': None,
+    'isolation_type': None,
+    'active_filter': None
+}
+
 # --- Data Management ---
 def load_todos():
     if not os.path.exists(TODO_FILE): return []
@@ -68,6 +78,10 @@ def load_todos():
 def save_todos(todos):
     with open(TODO_FILE, 'w') as f: json.dump(todos, f, indent=2)
 
+def clean_tags(tags):
+    if not tags: return []
+    return sorted(list(set(t.strip().upper() for t in tags if t and t.strip())))
+
 def add_todo(content, date_str, project, tags, description=""):
     todos = load_todos()
     new_todo = {
@@ -76,7 +90,7 @@ def add_todo(content, date_str, project, tags, description=""):
         "description": description,
         "date": date_str,
         "project": project if project else "General",
-        "tags": tags,
+        "tags": clean_tags(tags),
         "status": "pending",
         "timestamp": datetime.now().isoformat()
     }
@@ -92,7 +106,7 @@ def complete_matching_todo(project, content):
             changed = True
     if changed: save_todos(todos)
 
-def toggle_todo(todo_id):
+def toggle_todo(todo_id, duration_mins=30):
     todos = load_todos()
     target = None
     for t in todos:
@@ -112,7 +126,7 @@ def toggle_todo(todo_id):
             "id": sess_id,
             "project": target.get('project', 'General'),
             "task": target.get('content', 'Unknown'),
-            "duration_minutes": 30,
+            "duration_minutes": duration_mins,
             "timestamp": datetime.now().isoformat(),
             "status": "completed",
             "manual_log": True
@@ -636,7 +650,8 @@ def show_history(stdscr):
                 
                 # Selection vs Row attribute
                 if ii == idx:
-                    attr = curses.color_pair(p_color_id or 1) | curses.A_REVERSE
+                    # Use standard high-contrast selection (Black/White) to ensure readability
+                    attr = curses.color_pair(0) | curses.A_REVERSE
                 else:
                     attr = curses.color_pair(p_color_id) if p_color_id else 0
                 
@@ -932,6 +947,44 @@ def show_info_screen(stdscr):
 
 PROJECT_COLORS_NAMES = ["Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White", "Crimson", "Lime", "Violet"]
 
+def setup_colors():
+    curses.start_color(); curses.use_default_colors()
+    # Basic UI Colors
+    for i, c in enumerate([curses.COLOR_WHITE, curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW], 1): curses.init_pair(i, c, -1)
+    
+    # Project Colors (IDs 30-39)
+    # Use Fixed Xterm-256 Color Codes to bypass terminal themes
+    # These indices (16-255) are standard and usually not overridden by color schemes.
+    # Order: Red, Green, Yellow, Blue, Magenta, Cyan, White, Orange, Lime, Violet
+    xterm_256_map = [
+        196, # 0: Red (Bright)
+        46,  # 1: Green (Bright)
+        226, # 2: Yellow (Bright)
+        39,  # 3: Blue (Deep Sky)
+        201, # 4: Magenta (Hot Pink)
+        51,  # 5: Cyan (Electric)
+        231, # 6: White (Bright)
+        208, # 7: Orange
+        118, # 8: Lime
+        129  # 9: Violet
+    ]
+    
+    # Fallback standard colors for terminals that might not support 256 colors (e.g. very old ones)
+    std_colors = [
+        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, 
+        curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, 
+        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_MAGENTA
+    ]
+    
+    for i in range(10):
+        pair_id = 30 + i
+        # Try to use 256 colors if the terminal supports them (COLORS > 200)
+        # Most modern terminals (Alacritty, Kitty, iTerm, Gnome) support 256.
+        if curses.COLORS > 200:
+            curses.init_pair(pair_id, xterm_256_map[i], -1)
+        else:
+            curses.init_pair(pair_id, std_colors[i], -1)
+
 def select_color(stdscr, y, x):
     sel = 0
     while True:
@@ -1004,12 +1057,406 @@ def add_new_todo_dialog(stdscr):
 
 
 
+def update_todo(todo_id, content, date_str, project, tags, description):
+    todos = load_todos()
+    for t in todos:
+        if t['id'] == todo_id:
+            t['content'] = content
+            t['date'] = date_str
+            t['project'] = project
+            t['tags'] = clean_tags(tags)
+            t['description'] = description
+            break
+    save_todos(todos)
+
+def edit_todo_dialog(stdscr, item):
+    h, w = stdscr.getmaxyx()
+    # Pre-fill
+    orig_content = item['content']
+    orig_desc = item.get('description', '')
+    orig_date = item.get('date', '')
+    orig_proj = item.get('project', 'General')
+    orig_tags = ",".join(item.get('tags', []))
+    
+    # 1. Content
+    content = text_input(stdscr, h//2 - 6, w//2 - 20, "EDIT TASK CONTENT:", orig_content)
+    if content is None: return False
+    if not content.strip(): return False
+    
+    # 2. Description
+    desc = text_input(stdscr, h//2 - 4, w//2 - 20, "EDIT DESCRIPTION:", orig_desc)
+    if desc is None: desc = ""
+    
+    # 3. Date
+    d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "EDIT DATE:", orig_date)
+    if d_str is None: return False
+    
+    # 4. Project
+    # We can't easily pre-select in fuzzy_select, so we let user choose again or keep current
+    projs = ["KEEP CURRENT (" + orig_proj + ")"] + ["General"] + get_unique_projects() + ["+ NEW PROJECT"]
+    p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "EDIT PROJECT", projs)
+    if p is None: return False
+    
+    final_proj = orig_proj
+    new_proj_color = None
+    new_proj_tags = []
+    
+    if p.startswith("KEEP CURRENT"):
+        final_proj = orig_proj
+    elif p == "+ NEW PROJECT":
+        final_proj = text_input(stdscr, h//2 + 2, w//2 - 20, "NEW PROJECT NAME:")
+        if not final_proj: return False
+        
+        # New Project Setup
+        p_tags_str = text_input(stdscr, h//2 + 4, w//2 - 20, "PROJECT TAGS (comma sep):")
+        new_proj_tags = [t.strip() for t in p_tags_str.split(',')] if p_tags_str else []
+        curses.flushinp()
+        new_proj_color = select_color(stdscr, h//2 - 5, w//2 + 22)
+    else:
+        final_proj = p
+
+    # 5. Tags
+    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "EDIT TAGS (comma sep):", orig_tags)
+    if tags_str is None: return False
+    tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
+    
+    # Save
+    msg = " SAVE CHANGES? (y/n/Enter) "
+    safe_addstr(stdscr, h-1, 2, " " * (w-3))
+    safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
+    stdscr.refresh()
+    stdscr.timeout(-1)
+    k = stdscr.getch()
+    stdscr.timeout(50)
+    
+    if k in [ord('y'), ord('Y'), 10, 13]:
+        # Handle new project creation if needed
+        if p == "+ NEW PROJECT":
+             add_project(final_proj, new_proj_color, new_proj_tags)
+        
+        update_todo(item['id'], content, d_str, final_proj, tags, desc)
+        return True
+    
+    return False
+
+def get_all_used_tags():
+    todos = load_todos()
+    tags = set()
+    for t in todos:
+        for tag in t.get('tags', []):
+            tags.add(tag)
+    return sorted(list(tags))
+
+def tag_filtering_dialog(stdscr):
+    h, w = stdscr.getmaxyx()
+    all_tags = get_all_used_tags()
+    selected_tags = []
+    query = ""
+    matches = []
+    sel_idx = 0
+    
+    # Box Config
+    box_w = min(60, w - 4)
+    box_h = 16
+    box_y = (h - box_h) // 2
+    box_x = (w - box_w) // 2
+    
+    # Helper to clear box area
+    def clear_box_area():
+        for y in range(box_h):
+            safe_addstr(stdscr, box_y+y, box_x, " " * box_w)
+    
+    # PHASE 1: TAG SELECTION
+    while True:
+        # Draw Over (Fake Clear of Box Area)
+        clear_box_area()
+        draw_box(stdscr, box_y, box_x, box_h, box_w, "FILTER BY TAGS")
+        
+        # 1. Show Selected
+        sel_str = ", ".join(selected_tags)
+        if len(sel_str) > box_w - 6: sel_str = "..." + sel_str[-(box_w-9):]
+        safe_addstr(stdscr, box_y+2, box_x+2, f"SELECTED: [{sel_str}]", curses.color_pair(2)|curses.A_BOLD)
+        
+        # 2. Input
+        safe_addstr(stdscr, box_y+4, box_x+2, "ADD TAG: " + query)
+        safe_addstr(stdscr, box_y+4, box_x+11+len(query), "_", curses.A_BLINK)
+        
+        # 3. Matches
+        matches = [t for t in all_tags if t not in selected_tags and (not query or query.lower() in t.lower())]
+        
+        display_list = matches[:8]
+        if not query and not matches and selected_tags:
+             display_list = ["[ CONFIRM FILTER ]"]
+        elif query == "" and matches:
+             display_list = ["[ CONFIRM FILTER ]"] + matches[:7]
+        
+        if sel_idx >= len(display_list): sel_idx = max(0, len(display_list)-1)
+        
+        for i, item in enumerate(display_list):
+            attr = curses.A_REVERSE if i == sel_idx else 0
+            safe_addstr(stdscr, box_y+6+i, box_x+4, f" {item} ", attr)
+            
+        safe_addstr(stdscr, box_y+box_h-2, box_x+2, "[Enter] Add/Confirm  [UP/DOWN] Select  [ESC] Cancel", curses.A_DIM)
+        
+        stdscr.refresh()
+        stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
+        
+        if k == -1: time.sleep(0.05); continue
+        
+        if k == 27: return None # Cancel
+        elif k == curses.KEY_UP: sel_idx = max(0, sel_idx - 1)
+        elif k == curses.KEY_DOWN: sel_idx = min(len(display_list) - 1, sel_idx + 1)
+        elif k in [curses.KEY_BACKSPACE, 127, 8]: 
+            query = query[:-1]
+            sel_idx = 0
+        elif k in [10, 13]: # Enter
+            if display_list:
+                choice = display_list[sel_idx]
+                if choice == "[ CONFIRM FILTER ]":
+                    break # Go to options
+                else:
+                    selected_tags.append(choice)
+                    query = ""
+                    sel_idx = 0
+            elif query: 
+                # Allow custom
+                pass
+        elif 32 <= k <= 126 and len(query) < 20:
+            query += chr(k)
+            sel_idx = 0 
+            
+    # Phase 2: Options (Inside same box)
+    status_mode = 'ALL' # ALL, PENDING, DONE
+    inc_tagless = False
+    
+    # Prompt 1: Status Filter
+    clear_box_area()
+    draw_box(stdscr, box_y, box_x, box_h, box_w, "FILTER OPTIONS (1/2)")
+    msg1 = "FILTER BY STATUS:"
+    safe_addstr(stdscr, box_y+6, box_x + (box_w-len(msg1))//2, msg1, curses.A_BOLD)
+    
+    opts = "[A] ALL  [P] PENDING ONLY  [D] DONE ONLY"
+    safe_addstr(stdscr, box_y+8, box_x + (box_w-len(opts))//2, opts, curses.color_pair(3))
+    
+    stdscr.refresh()
+    while True:
+        k = stdscr.getch()
+        if k in [ord('a'), ord('A'), 13, 10]: status_mode = 'ALL'; break
+        elif k in [ord('p'), ord('P')]: status_mode = 'PENDING'; break
+        elif k in [ord('d'), ord('D')]: status_mode = 'DONE'; break
+        elif k == 27: return None
+        
+    # Prompt 2: Tagless
+    clear_box_area()
+    draw_box(stdscr, box_y, box_x, box_h, box_w, "FILTER OPTIONS (2/2)")
+    msg2 = "INCLUDE ITEMS WITH NO TAGS?"
+    safe_addstr(stdscr, box_y+6, box_x + (box_w-len(msg2))//2, msg2, curses.A_BOLD)
+    safe_addstr(stdscr, box_y+8, box_x + (box_w-14)//2, "[Y] YES  [N] NO", curses.color_pair(3))
+    stdscr.refresh()
+    while True:
+        k = stdscr.getch()
+        if k in [ord('y'), ord('Y')]: inc_tagless = True; break
+        elif k in [ord('n'), ord('N'), 13, 10]: break
+        elif k == 27: return None
+        
+    return (selected_tags, status_mode, inc_tagless)
+
+def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx):
+    h, w = stdscr.getmaxyx()
+    list_h = h - 5
+    if not tree: 
+        safe_addstr(stdscr, 4, 4, "No tasks found.", curses.A_DIM)
+        return
+    
+    # Selection/Scroll clamping
+    sel_idx = max(0, min(sel_idx, len(tree)-1))
+    if sel_idx < scroll_idx: scroll_idx = sel_idx
+    elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
+    
+    for i in range(list_h):
+        ii = scroll_idx + i
+        if ii >= len(tree): break
+        node = tree[ii]
+        is_sel = (ii == sel_idx)
+        attr = curses.A_REVERSE if is_sel else 0
+        
+        # Margin Asterisk
+        show_ast = False
+        ast_col = 5
+        if node['type'] == 'item':
+            if node['data']['status'] == 'pending': 
+                show_ast = True; ast_col = p_colors.get(node['data'].get('project', 'General'), 5)
+        elif node['type'] in ['project', 'date_group', 'group']:
+            if node['done'] < node['total']: 
+                show_ast = True; ast_col = p_colors.get(node.get('key', node.get('parent', 'General')), 5)
+        
+        if show_ast:
+            try: col_p = curses.color_pair(ast_col)
+            except: col_p = curses.color_pair(5)
+            safe_addstr(stdscr, 4+i, 0, "\U0001F7BA", col_p)
+
+        # Rendering
+        if node['type'] == 'group':
+            k = node['key']
+            lbl = f"  {k}"
+            try:
+                dt = datetime.strptime(k, "%Y-%m-%d")
+                lbl = dt.strftime("%a %d/%b/%Y").upper()
+                lbl = f"★ {lbl}" if k == today_str else f"  {lbl}"
+            except: pass
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            icon = "[-]" if k in TODO_STATE['expanded_daily'] else "[+]"
+            is_past_pending = k < today_str and node['done'] < node['total']
+            h_attr = curses.color_pair(5)|curses.A_BOLD if is_past_pending else curses.color_pair(4)
+            safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|h_attr)
+        
+        elif node['type'] == 'project':
+            k = node['key']
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            is_open = k in TODO_STATE['expanded_project']
+            icon = "[-]" if is_open else "[+]"
+            col = curses.color_pair(p_colors.get(k, 3))
+            safe_addstr(stdscr, 4+i, 2, f"{icon} {k:<25} {pct:>3}%", attr|col|curses.A_BOLD)
+            
+        elif node['type'] == 'date_group':
+            d, p_name = node['date'], node['parent']
+            lbl = d
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                lbl = dt.strftime("%a %d/%b/%Y").upper()
+                lbl = f"★ {lbl}" if d == today_str else f"  {lbl}"
+            except: pass
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            col = curses.color_pair(p_colors.get(p_name, 3))
+            is_backlog = d < today_str and node['done'] < node['total']
+            line = ("  ├─" if not node['is_last'] else "  └─") if not is_backlog else ("  ├╌" if not node['is_last'] else "  └╌")
+            d_attr = curses.color_pair(5)|curses.A_BOLD if is_backlog else curses.color_pair(4)
+            safe_addstr(stdscr, 4+i, 2, line, col)
+            safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|d_attr)
+
+        elif node['type'] == 'item':
+            item = node['data']
+            st = "[x]" if item['status']=='done' else "[ ]"
+            is_overdue = (item.get('date', '9999-99-99') < today_str) and (item['status'] == 'pending')
+            col = curses.color_pair(2) if item['status'] == 'done' else (curses.color_pair(5) if is_overdue else 0)
+            t_str = " " + " ".join([f"#{t}" for t in item.get('tags', []) if t])
+            
+            if TODO_STATE['mode'] == 'DAILY':
+                p_name = item.get('project', 'General')
+                if p_name != "General" and not is_overdue and item['status'] != 'done':
+                    try: col = curses.color_pair(p_colors.get(p_name, 0))
+                    except: pass
+                safe_addstr(stdscr, 4+i, 4, f"{('╌╌ ' if is_overdue else '   ')}{st} {p_name}: {item['content']}{t_str}", attr|col)
+            else:
+                p_name = node.get('parent', '').split('|')[0]
+                t_col = curses.color_pair(p_colors.get(p_name, 3))
+                line = f"  {'│' if not node.get('parent_last') else ' '}  {'├' if not node.get('is_last') else '└'}{'╌' if item['status'] == 'pending' else '─'}"
+                safe_addstr(stdscr, 4+i, 2, line, t_col)
+                safe_addstr(stdscr, 4+i, 9, f"{st} {item['content']}{t_str}", attr|col)
+            
+        if ii == delete_pending_idx:
+            safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+    return scroll_idx
+
+def show_neobrutalist_popup(stdscr, tree, start_idx):
+    idx = start_idx
+    h, w = stdscr.getmaxyx()
+    scroll_idx = 0 # Local scroll tracker for background
+    
+    while True:
+        # 1. Update background (Todo Tree)
+        # Recalculate scroll_idx to follow idx
+        list_h = h - 5
+        if idx < scroll_idx: scroll_idx = idx
+        elif idx >= scroll_idx + list_h: scroll_idx = idx - list_h + 1
+        
+        # Redraw background elements
+        tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
+        cfg = load_config()
+        p_colors = cfg.get('project_colors', {})
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # Render Todo List Tabs/Header
+        mode = TODO_STATE['mode']
+        tabs = f" [{'DAILY' if mode=='DAILY' else '  DAILY  '}] " + f" [{'PROJECT' if mode=='PROJECT' else '  PROJECT  '}] "
+        safe_addstr(stdscr, 1, 2, tabs, curses.color_pair(3)|curses.A_BOLD)
+        safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(3))
+        
+        draw_todo_tree(stdscr, tree, idx, scroll_idx, today_str, p_colors, -1)
+        
+        # 2. Flicker Transition Effect (Brief inversion of the whole UI)
+        # We only flicker when idx changes, but for simplicity let's do a fast draw
+        
+        # 3. Draw Card Popup
+        node = tree[idx]; item = node['data']
+        card_w, card_h = min(84, int(w * 0.9)), min(26, int(h * 0.9))
+        cy, cx = (h - card_h) // 2, (w - card_w) // 2
+        p_name = item.get('project', 'General')
+        p_col_id = p_colors.get(p_name, 4)
+        
+        # Shadow & Body
+        for y in range(cy + 1, cy + card_h + 1): safe_addstr(stdscr, y, cx + 2, " " * card_w, curses.color_pair(8))
+        main_attr = curses.color_pair(p_col_id) | curses.A_REVERSE | curses.A_BOLD
+        for y in range(cy, cy + card_h): safe_addstr(stdscr, y, cx, " " * card_w, main_attr)
+            
+        # Stickers
+        st_attr = curses.color_pair(0) | curses.A_BOLD
+        safe_addstr(stdscr, cy+1, cx+2, f"  {p_name.upper()}  ", st_attr)
+        safe_addstr(stdscr, cy+2, cx+4, f" {item.get('date', 'NA')} ", st_attr)
+        status = item['status'].upper()
+        s_col = curses.color_pair(2 if status == 'DONE' else 5)
+        safe_addstr(stdscr, cy+1, cx+card_w-len(status)-6, f" {status} ", s_col | curses.A_BOLD | curses.A_REVERSE)
+        safe_addstr(stdscr, cy+2, cx+card_w-15, " REWARD: 30 XP ", st_attr)
+        
+        # Content
+        content, inner_w = item['content'], card_w - 8
+        lines = []
+        while len(content) > inner_w:
+            split = content[:inner_w].rfind(' '); split = split if split != -1 else inner_w
+            lines.append(content[:split]); content = content[split:].strip()
+        lines.append(content)
+        for i, line in enumerate(lines[:5]): safe_addstr(stdscr, cy+5+i, cx+4, line, main_attr)
+        
+        desc = item.get('description', '')
+        if desc:
+            safe_addstr(stdscr, cy+11, cx+2, "▀" * (card_w-4), main_attr)
+            safe_addstr(stdscr, cy+12, cx+4, "DESCRIPTION:", main_attr|curses.A_UNDERLINE)
+            d_lines = []
+            while len(desc) > inner_w:
+                split = desc[:inner_w].rfind(' '); split = split if split != -1 else inner_w
+                d_lines.append(desc[:split]); desc = desc[split:].strip()
+            d_lines.append(desc)
+            for i, line in enumerate(d_lines[:8]): safe_addstr(stdscr, cy+14+i, cx+4, line, main_attr)
+
+        stdscr.refresh()
+        k = stdscr.getch()
+        if k in [ord(' '), 27]: return idx
+        elif k == curses.KEY_UP:
+            tmp = idx - 1
+            while tmp >= 0 and tree[tmp]['type'] != 'item': tmp -= 1
+            if tmp >= 0: idx = tmp
+        elif k == curses.KEY_DOWN:
+            tmp = idx + 1
+            while tmp < len(tree) and tree[tmp]['type'] != 'item': tmp += 1
+            if tmp < len(tree): idx = tmp
+        elif k in [10, 13, 529]:
+            dur = 30
+            if k == 529:
+                dur = select_duration(stdscr)
+                if dur is None: dur = 0
+            if dur > 0:
+                toggle_todo(item['id'], dur)
+                tree[idx]['data'] = next(t for t in load_todos() if t['id'] == item['id'])
+
+
 def show_todo_list(stdscr):
-    mode = 'DAILY'
-    backlog_active = False
-    isolation_filter = None # Key to filter by
-    isolation_type = None   # 'project', 'date', 'date_group'
-    expanded = set()
+    # Use global state for persistence
+    mode = TODO_STATE['mode']
+    backlog_active = TODO_STATE['backlog_active']
+    isolation_filter = TODO_STATE['isolation_filter']
+    isolation_type = TODO_STATE['isolation_type']
+    active_filter = TODO_STATE['active_filter']
+    
     sel_idx = 0
     scroll_idx = 0
     delete_pending_idx = -1
@@ -1017,6 +1464,16 @@ def show_todo_list(stdscr):
     
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
+        # Dynamic expansion set based on mode
+        expanded = TODO_STATE['expanded_daily'] if mode == 'DAILY' else TODO_STATE['expanded_project']
+        
+        # Update global state sync
+        TODO_STATE['mode'] = mode
+        TODO_STATE['backlog_active'] = backlog_active
+        TODO_STATE['isolation_filter'] = isolation_filter
+        TODO_STATE['isolation_type'] = isolation_type
+        TODO_STATE['active_filter'] = active_filter
+
         all_todos = load_todos()
         today_str = datetime.now().strftime("%Y-%m-%d")
         cfg = load_config()
@@ -1036,7 +1493,40 @@ def show_todo_list(stdscr):
         else:
             todos = all_todos
 
-        # 2. Apply Backlog Filter (on top of isolation)
+        # 2. Apply Tag/Feature Filter
+        if active_filter:
+            sel_tags, status_mode, inc_tagless = active_filter
+            filtered = []
+            for t in todos:
+                t_tags = t.get('tags', [])
+                has_match = any(tag in t_tags for tag in sel_tags)
+                is_tagless = not t_tags
+                is_pending = t['status'] == 'pending'
+                
+                # Logic: Content Match AND Status Match
+                
+                # 1. Content Match
+                content_match = False
+                if not sel_tags and not inc_tagless: 
+                    content_match = True # No tags selected and not focusing on tagless -> Show all content?
+                    # Usually if filter active but no tags selected, maybe just filtering by status?
+                    # Let's assume if sel_tags is empty, we show everything unless inc_tagless is true (then show only tagless)
+                    if inc_tagless: content_match = is_tagless
+                    else: content_match = True
+                else:
+                    if has_match: content_match = True
+                    if inc_tagless and is_tagless: content_match = True
+                
+                # 2. Status Match
+                status_match = True
+                if status_mode == 'PENDING' and not is_pending: status_match = False
+                if status_mode == 'DONE' and is_pending: status_match = False
+                
+                if content_match and status_match:
+                    filtered.append(t)
+            todos = filtered
+
+        # 3. Apply Backlog Filter (on top of isolation)
         if backlog_active:
             todos = [t for t in todos if t.get('date', '9999-99-99') <= today_str]
 
@@ -1136,193 +1626,18 @@ def show_todo_list(stdscr):
             # We will use A_REVERSE with the project color.
             iso_attr = curses.color_pair(iso_col)|curses.A_REVERSE if iso_col else curses.A_REVERSE
             safe_addstr(stdscr, 1, indicator_x, f" [ISOLATED: {iso_label}] ", iso_attr|curses.A_BOLD)
+            indicator_x += len(iso_label) + 14
+            
+        # Filter Indicator
+        if active_filter:
+             safe_addstr(stdscr, 1, indicator_x, " [FILTER ACTIVE] ", curses.color_pair(2)|curses.A_BOLD|curses.A_REVERSE)
             
         safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(3))
         
-        list_h = h - 5
-        if not tree: 
-            sel_idx = 0
-            safe_addstr(stdscr, 4, 4, "No tasks found.", curses.A_DIM)
-        else: sel_idx = max(0, min(sel_idx, len(tree)-1))
-        
-        if sel_idx < scroll_idx: scroll_idx = sel_idx
-        elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
-        
-        for i in range(list_h):
-            ii = scroll_idx + i
-            if ii >= len(tree): break
-            node = tree[ii]
-            is_sel = (ii == sel_idx)
-            attr = curses.A_REVERSE if is_sel else 0
-            
-            # Margin Asterisk Logic
-            show_asterisk = False
-            ast_color = 5 # Default Red
-            
-            if node['type'] == 'item':
-                if node['data']['status'] == 'pending': 
-                    show_asterisk = True
-                    p_name = node['data'].get('project', 'General')
-                    ast_color = p_colors.get(p_name, 5)
-            elif node['type'] == 'project':
-                if node['done'] < node['total']:
-                    show_asterisk = True
-                    ast_color = p_colors.get(node['key'], 5)
-            elif node['type'] == 'date_group':
-                if node['done'] < node['total']:
-                    show_asterisk = True
-                    ast_color = p_colors.get(node['parent'], 5)
-            elif node['type'] == 'group': # Daily View Date
-                if node['done'] < node['total']:
-                    show_asterisk = True
-                    ast_color = 5 # Keep Red for overdue days
-            
-            if show_asterisk:
-                try: col_pair = curses.color_pair(ast_color)
-                except: col_pair = curses.color_pair(5)
-                safe_addstr(stdscr, 4+i, 0, "\U0001F7BA", col_pair)
-
-            # Render Logic
-            if node['type'] == 'group': # DAILY Mode Header
-                k = node['key']
-                try:
-                    dt = datetime.strptime(k, "%Y-%m-%d")
-                    lbl = dt.strftime("%a %d/%b/%Y").upper()
-                    if k == today_str: lbl = f"★ {lbl}"
-                    else: lbl = f"  {lbl}"
-                except: lbl = k
-                pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                icon = "[-]" if k in expanded or (isolation_filter and isolation_type=='date') else "[+]"
-                
-                # Check for overdue pending tasks
-                is_past = k < today_str
-                has_pending = node['done'] < node['total']
-                header_attr = curses.color_pair(5)|curses.A_BOLD if (is_past and has_pending) else curses.color_pair(4)
-                
-                safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|header_attr)
-            
-            elif node['type'] == 'project': # PROJECT Mode Top Level
-                k = node['key']
-                pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                
-                # Auto-open if isolated
-                is_open = k in expanded or (isolation_filter == k and isolation_type == 'project')
-                icon = "[-]" if is_open else "[+]"
-                
-                # Project Color
-                col_id = p_colors.get(k, 3) # Default Blue
-                try: col = curses.color_pair(col_id)
-                except: col = curses.color_pair(3)
-                
-                safe_addstr(stdscr, 4+i, 2, f"{icon} {k:<25} {pct:>3}%", attr|col|curses.A_BOLD)
-                
-            elif node['type'] == 'date_group': # PROJECT Mode Date Sub-Level
-                d = node['date']
-                p_name = node['parent']
-                try:
-                    dt = datetime.strptime(d, "%Y-%m-%d")
-                    lbl = dt.strftime("%a %d/%b/%Y").upper()
-                    if d == today_str: lbl = f"★ {lbl}"
-                    else: lbl = f"  {lbl}"
-                except: lbl = d
-                
-                pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
-                
-                # Tree lines
-                col_id = p_colors.get(p_name, 3)
-                try: col = curses.color_pair(col_id)
-                except: col = curses.color_pair(3)
-                
-                # Check backlog (past incomplete) for dashes
-                is_backlog = d < today_str and node['done'] < node['total']
-                line_char = "  ├─" if not node['is_last'] else "  └─"
-                if is_backlog: line_char = "  ├╌" if not node['is_last'] else "  └╌"
-                
-                date_attr = curses.color_pair(5)|curses.A_BOLD if is_backlog else curses.color_pair(4)
-                
-                safe_addstr(stdscr, 4+i, 2, f"{line_char}", col)
-                safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|date_attr)
-
-            elif node['type'] == 'item':
-                item = node['data']
-                st = "[x]" if item['status']=='done' else "[ ]"
-                
-                # Determine Color
-                is_overdue = (item.get('date', '9999-99-99') < today_str) and (item['status'] == 'pending')
-                
-                if item['status'] == 'done':
-                    col = curses.color_pair(2) # Green
-                elif is_overdue:
-                    col = curses.color_pair(5) # Red for overdue
-                else:
-                    col = 0 # Default
-
-                tags = f" {{{','.join(item.get('tags',[]))}}}" if item.get('tags') else ""
-                
-                prefix = ""
-                indent = 4
-                
-                if mode == 'DAILY':
-                    indent = 4
-                    # Use Project Color for task text in Daily View (if not overdue/done)
-                    p_name = item.get('project', 'General')
-                    if p_name and p_name != "General" and not is_overdue and item['status'] != 'done':
-                         col_id = p_colors.get(p_name, 0)
-                         if col_id:
-                             try: col = curses.color_pair(col_id)
-                             except: pass
-                    
-                    # Backlog dashes
-                    if is_overdue: prefix = "╌╌ "
-                    else: prefix = "   "
-                    
-                    item_str = f"{prefix}{st} {p_name}: {item['content']}{tags}"
-                         
-                else: # PROJECT Mode
-                    indent = 6
-                    # Tree lines for tasks
-                    p_name = node.get('parent', '').split('|')[0]
-                    col_id = p_colors.get(p_name, 3)
-                    try: tree_col = curses.color_pair(col_id)
-                    except: tree_col = curses.color_pair(3)
-                    
-                    v_bar = "│" if not node.get('parent_last') else " "
-                    branch = "├" if not node.get('is_last') else "└"
-                    h_line = "─"
-                    
-                    # Dashed line for pending items
-                    if item['status'] == 'pending':
-                         h_line = "╌"
-                    
-                    line_str = f"  {v_bar}  {branch}{h_line}"
-                    
-                    safe_addstr(stdscr, 4+i, 2, line_str, tree_col)
-                    indent = 9
-                    item_str = f"{st} {item['content']}{tags}"
-                
-                # Truncation Logic
-                avail_w = w - indent - 1
-                if not is_sel and len(item_str) > avail_w:
-                    item_str = item_str[:avail_w-3] + "..."
-                
-                safe_addstr(stdscr, 4+i, indent, item_str, attr|col)
-                
-            if ii == delete_pending_idx:
-                safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
-        
-        # Detail View for Selected Item (if long)
-        if tree and 0 <= sel_idx < len(tree):
-            sel_node = tree[sel_idx]
-            if sel_node['type'] == 'item':
-                full_text = sel_node['data']['content']
-                desc = sel_node['data'].get('description', '')
-                if desc: full_text += f" | {desc}"
-                
-                if len(full_text) > w - 4:
-                    safe_addstr(stdscr, h-3, 2, f"FULL: {full_text}", curses.color_pair(3))
+        scroll_idx = draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx)
         
         nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
-        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [E/C] Exp/Col All  [I] Isolate  [N] New  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [X/C] Exp/Col All  [F] Filter  [I] Isolate  [SPACE] Details  [N] New  [E] Edit  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
@@ -1331,7 +1646,38 @@ def show_todo_list(stdscr):
         nav = check_nav_keys(k)
         if nav and nav != 'TODO' and nav != 'INFO': return nav
         
+        if k == ord(' '):
+            if tree and 0 <= sel_idx < len(tree):
+                node = tree[sel_idx]
+                if node['type'] == 'item':
+                    sel_idx = show_neobrutalist_popup(stdscr, tree, sel_idx)
+        
+        if k in [ord('f'), ord('F')]:
+            if active_filter:
+                # Prompt to clear
+                safe_addstr(stdscr, h-2, 2, " " * (w-1))
+                msg = " REMOVE FILTER? (y/n) "
+                safe_addstr(stdscr, h//2, w//2 - len(msg)//2, msg, curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+                stdscr.refresh()
+                while True:
+                    ck = stdscr.getch()
+                    if ck in [ord('y'), ord('Y')]: active_filter = None; break
+                    elif ck in [ord('n'), ord('N'), 27]: break
+            else:
+                active_filter = tag_filtering_dialog(stdscr)
+                sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
+        
         if k in [ord('e'), ord('E')]:
+            if tree and 0 <= sel_idx < len(tree):
+                node = tree[sel_idx]
+                if node['type'] == 'item':
+                    # Edit
+                    res = edit_todo_dialog(stdscr, node['data'])
+                    if res:
+                        # Refresh data
+                        sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
+        
+        if k in [ord('x'), ord('X')]:
             if mode == 'DAILY':
                 expanded.update(set(t.get('date', 'Unknown') for t in todos))
             else:
@@ -1344,8 +1690,7 @@ def show_todo_list(stdscr):
         
         if k in [ord('b'), ord('B')]:
             backlog_active = not backlog_active
-            # Don't clear isolation, just re-apply backlog filtering
-            expanded = set()
+            # Preserve expansion state, just reset selection
             sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
             
         if k in [ord('i'), ord('I')]:
@@ -1376,13 +1721,12 @@ def show_todo_list(stdscr):
         
         if k == 9: # TAB
             mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
-            expanded = set()
             sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
         elif k in [curses.KEY_DOWN, ord('j')]: 
             sel_idx += 1; delete_pending_idx = -1
         elif k in [curses.KEY_UP, ord('k')]: 
             sel_idx -= 1; delete_pending_idx = -1
-        elif k in [10, 13]:
+        elif k in [10, 13, 529]: # Enter (13) or Ctrl+Enter (10/529)
             if tree:
                 node = tree[sel_idx]
                 if node['type'] in ['group', 'project', 'date_group']:
@@ -1395,7 +1739,20 @@ def show_todo_list(stdscr):
                             expanded.add(today_key)
                             jump_target = today_key
                 else:
-                    toggle_todo(node['data']['id'])
+                    item = node['data']
+                    if item['status'] == 'pending':
+                        # If Ctrl+Enter, prompt for time. Otherwise default 30.
+                        duration = 30
+                        if k in [10, 529]:
+                            duration = select_duration(stdscr)
+                            if duration is None: # Cancelled
+                                duration = 0
+                        
+                        if duration > 0:
+                            toggle_todo(item['id'], duration)
+                    else:
+                        # Toggling back to pending (no time needed)
+                        toggle_todo(item['id'])
             delete_pending_idx = -1
         elif k in [ord('n'), ord('N')]:
             new_p = add_new_todo_dialog(stdscr); delete_pending_idx = -1
@@ -1433,42 +1790,7 @@ def calculate_stats():
     return tt, ty, (tt/ty if ty else (float('inf') if tt else 0))
 
 def main(stdscr):
-    curses.start_color(); curses.use_default_colors()
-    # Basic UI Colors
-    for i, c in enumerate([curses.COLOR_WHITE, curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_YELLOW], 1): curses.init_pair(i, c, -1)
-    
-    # Project Colors (IDs 30-39)
-    # Use Fixed Xterm-256 Color Codes to bypass terminal themes
-    # These indices (16-255) are standard and usually not overridden by color schemes.
-    # Order: Red, Green, Yellow, Blue, Magenta, Cyan, White, Orange, Lime, Violet
-    xterm_256_map = [
-        196, # 0: Red (Bright)
-        46,  # 1: Green (Bright)
-        226, # 2: Yellow (Bright)
-        39,  # 3: Blue (Deep Sky)
-        201, # 4: Magenta (Hot Pink)
-        51,  # 5: Cyan (Electric)
-        231, # 6: White (Bright)
-        208, # 7: Orange
-        118, # 8: Lime
-        129  # 9: Violet
-    ]
-    
-    # Fallback standard colors for terminals that might not support 256 colors (e.g. very old ones)
-    std_colors = [
-        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE, 
-        curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_WHITE, 
-        curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_MAGENTA
-    ]
-    
-    for i in range(10):
-        pair_id = 30 + i
-        # Try to use 256 colors if the terminal supports them (COLORS > 200)
-        # Most modern terminals (Alacritty, Kitty, iTerm, Gnome) support 256.
-        if curses.COLORS > 200:
-            curses.init_pair(pair_id, xterm_256_map[i], -1)
-        else:
-            curses.init_pair(pair_id, std_colors[i], -1)
+    setup_colors()
 
     curses.curs_set(0); view = 'HISTORY'
     while True:
