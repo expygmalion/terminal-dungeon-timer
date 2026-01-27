@@ -721,7 +721,8 @@ def show_history(stdscr):
                      'date': datetime.fromisoformat(item['timestamp']).strftime("%Y-%m-%d"),
                      'status': 'DONE' if item.get('status')=='completed' else 'TERM',
                      'tags': [], # History doesn't store tags by default currently, unless we change save_session
-                     'description': f"Logged on: {datetime.fromisoformat(item['timestamp']).strftime('%Y-%m-%d %H:%M')}\nDuration: {item.get('duration_minutes',0)} minutes"
+                     'meta_label': f" DURATION: {item.get('duration_minutes', 0) if item.get('status')=='completed' else int(item.get('actual_duration_seconds',0)/60)}m ",
+                     'description': f"Logged on: {datetime.fromisoformat(item['timestamp']).strftime('%Y-%m-%d %H:%M')}"
                  }
                  
                  mock_tree = [{'type': 'item', 'data': mock_data}]
@@ -1668,6 +1669,10 @@ def draw_neobrutalist_card(stdscr, item, p_colors):
     status = item.get('status', 'PENDING').upper()
     s_col = curses.color_pair(2 if status == 'DONE' or status == 'COMPLETED' else 5)
     safe_addstr(stdscr, cy+1, cx+card_w-len(status)-6, f" {status} ", s_col | curses.A_BOLD | curses.A_REVERSE)
+    
+    # Dynamic Meta Label (Reward/Duration)
+    meta = item.get('meta_label', " REWARD: 30 XP ")
+    safe_addstr(stdscr, cy+2, cx+card_w-len(meta)-4, meta, st_attr)
     
     # Content
     content, inner_w = item.get('content', ''), card_w - 8
