@@ -1271,36 +1271,94 @@ def add_new_todo_dialog(stdscr):
         
         if step == 'PROJECT':
             sel_idx = 0
-            if state['project'] in all_projs: sel_idx = all_projs.index(state['project'])
+            scroll_idx = 0
+            query = ""
+            
             while True:
-                p_name = all_projs[sel_idx]; c_id = p_colors.get(p_name, 4)
-                if p_name == "+ NEW PROJECT": c_id = 0
+                # Filter matches
+                if query:
+                    matches = [p for p in all_projs if query.lower() in p.lower()]
+                    if query not in matches:
+                        matches.insert(0, f"+ CREATE: {query}")
+                else:
+                    matches = all_projs[:]
+                
+                # Determine preview info
+                if matches and 0 <= sel_idx < len(matches):
+                    p_name = matches[sel_idx]
+                    if p_name.startswith("+ CREATE: "): p_name = p_name[10:]
+                else:
+                    p_name = query if query else "General"
+                
+                c_id = p_colors.get(p_name, 4)
+                if p_name == "+ NEW PROJECT" or p_name not in p_colors: c_id = 0
+                
                 main_attr = draw_base_card(c_id, "STEP 1: SELECT PROJECT")
-                for i, p in enumerate(all_projs[:15]):
-                    p_attr = curses.A_REVERSE if i == sel_idx else 0
-                    p_col = p_colors.get(p, 0)
-                    if i != sel_idx and p_col:
-                        try: p_attr |= curses.color_pair(p_col)
-                        except: pass
-                    safe_addstr(stdscr, cy+4+i, cx+4, f" {p} ", p_attr)
+                
+                # Search Bar
+                safe_addstr(stdscr, cy+3, cx+4, f"SEARCH: {query}", main_attr)
+                safe_addstr(stdscr, cy+3, cx+12+len(query), "_", main_attr | curses.A_BLINK)
+                
+                # List with Scroll
+                list_h = max(5, card_h - 8)
+                if sel_idx < scroll_idx: scroll_idx = sel_idx
+                elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
+                
+                for i in range(list_h):
+                    ii = scroll_idx + i
+                    if ii >= len(matches): break
+                    p = matches[ii]
+                    
+                    is_sel = (ii == sel_idx)
+                    attr = curses.A_REVERSE if is_sel else 0
+                    
+                    # Resolve color
+                    clean_p = p[10:] if p.startswith("+ CREATE: ") else p
+                    if clean_p == "+ NEW PROJECT": clean_p = "General"
+                    
+                    p_col = p_colors.get(clean_p, 0)
+                    if is_sel: attr |= curses.color_pair(0)
+                    elif p_col: attr |= curses.color_pair(p_col)
+                    
+                    safe_addstr(stdscr, cy+5+i, cx+4, f" {p[:card_w-10]} ", attr)
+                
                 stdscr.refresh()
                 k = stdscr.getch()
-                if k == 27: return None # Exit dialog
-                elif k == 542: return None # Back from first step
+                
+                if k == 27: return None
+                elif k == 542: return None
                 elif k == curses.KEY_UP: sel_idx = max(0, sel_idx - 1)
-                elif k == curses.KEY_DOWN: sel_idx = min(len(all_projs)-1, sel_idx + 1)
+                elif k == curses.KEY_DOWN: sel_idx = min(len(matches)-1, sel_idx + 1)
+                elif k in [curses.KEY_BACKSPACE, 127, 8]:
+                    query = query[:-1]
+                    sel_idx = 0
+                elif 32 <= k <= 126:
+                    query += chr(k)
+                    sel_idx = 0
                 elif k in [10, 13]:
-                    if all_projs[sel_idx] == "+ NEW PROJECT":
-                        res, a = text_input(stdscr, cy+4, cx+4, "NEW PROJECT NAME:")
-                        if a == "CANCEL": return None
-                        if res:
-                            state['project'] = res
+                    if not matches and query:
+                         state['project'] = query
+                         state['color_id'] = select_color(stdscr, cy+6, cx+4) or 4
+                         add_project(state['project'], state['color_id'], [])
+                         cur_step += 1; break
+                    elif matches:
+                        sel_p = matches[sel_idx]
+                        if sel_p.startswith("+ CREATE: "):
+                            new_p = sel_p[10:]
+                            state['project'] = new_p
                             state['color_id'] = select_color(stdscr, cy+6, cx+4) or 4
                             add_project(state['project'], state['color_id'], [])
-                    else:
-                        state['project'] = all_projs[sel_idx]
-                        state['color_id'] = c_id
-                    cur_step += 1; break
+                        elif sel_p == "+ NEW PROJECT":
+                             res, _ = text_input(stdscr, cy+4, cx+4, "NEW PROJECT NAME:")
+                             if res:
+                                 state['project'] = res
+                                 state['color_id'] = select_color(stdscr, cy+6, cx+4) or 4
+                                 add_project(state['project'], state['color_id'], [])
+                             else: continue
+                        else:
+                            state['project'] = sel_p
+                            state['color_id'] = p_colors.get(sel_p, 4)
+                        cur_step += 1; break
 
         elif step == 'NAME':
             main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
