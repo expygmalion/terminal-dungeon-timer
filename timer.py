@@ -710,27 +710,46 @@ def show_history(stdscr):
         elif k == curses.KEY_UP: idx -= 1
         elif k == curses.KEY_DOWN: idx += 1
         elif k == ord(' ') and display_history:
-             if 0 <= idx < len(display_history):
-                 item = display_history[idx]
-                 mock_data = {
-                     'id': item.get('id', 'history'),
-                     'project': item.get('project', 'General'),
-                     'content': item.get('task', 'No Task'),
-                     'date': datetime.fromisoformat(item['timestamp']).strftime("%Y-%m-%d"),
-                     'status': 'DONE' if item.get('status')=='completed' else 'TERM',
-                     'tags': [], 
-                     'meta_label': f" DURATION: {item.get('duration_minutes', 0) if item.get('status')=='completed' else int(item.get('actual_duration_seconds',0)/60)}m ",
-                     'description': f"Logged on: {datetime.fromisoformat(item['timestamp']).strftime('%Y-%m-%d %H:%M')}"
-                 }
+             curr_idx = idx
+             while True:
+                 # Update scroll if needed (using estimated list_h or previous)
+                 # We call render to get list_h first? No, just render.
+                 _, list_h = render(scroll, curr_idx)
                  
-                 while True:
-                     render(scroll, idx)
+                 # Fix scroll if cursor moved off screen
+                 if curr_idx < scroll: 
+                     scroll = curr_idx
+                     _, list_h = render(scroll, curr_idx)
+                 elif curr_idx >= scroll + list_h: 
+                     scroll = curr_idx - list_h + 1
+                     _, list_h = render(scroll, curr_idx)
+                 
+                 # Get Item Data
+                 if 0 <= curr_idx < len(display_history):
+                     item = display_history[curr_idx]
+                     mock_data = {
+                         'id': item.get('id', 'history'),
+                         'project': item.get('project', 'General'),
+                         'content': item.get('task', 'No Task'),
+                         'date': datetime.fromisoformat(item['timestamp']).strftime("%Y-%m-%d"),
+                         'status': 'DONE' if item.get('status')=='completed' else 'TERM',
+                         'tags': [], 
+                         'meta_label': f" DURATION: {item.get('duration_minutes', 0) if item.get('status')=='completed' else int(item.get('actual_duration_seconds',0)/60)}m ",
+                         'description': f"Logged on: {datetime.fromisoformat(item['timestamp']).strftime('%Y-%m-%d %H:%M')}"
+                     }
                      draw_neobrutalist_card(stdscr, mock_data, cfg.get('project_colors', {}))
-                     curses.curs_set(0)
-                     stdscr.refresh()
-                     k2 = stdscr.getch()
-                     if k2 in [ord(' '), 27]: break
-                     time.sleep(0.05)
+                 
+                 curses.curs_set(0)
+                 stdscr.refresh()
+                 k2 = stdscr.getch()
+                 
+                 if k2 in [ord(' '), 27]: break
+                 elif k2 == curses.KEY_UP: curr_idx = max(0, curr_idx - 1)
+                 elif k2 == curses.KEY_DOWN: curr_idx = min(len(display_history)-1, curr_idx + 1)
+                 
+                 time.sleep(0.05)
+             
+             idx = curr_idx
 
 def show_timer_view(stdscr):
     btn = 0
