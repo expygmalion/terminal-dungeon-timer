@@ -7,6 +7,7 @@ import sys
 import curses.ascii
 from datetime import datetime, timedelta
 import uuid
+import textwrap
 
 # --- Configuration & Constants ---
 DATA_FILE = "timer_history.json"
@@ -1630,35 +1631,38 @@ def tag_filtering_dialog(stdscr):
 
 def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx):
     h, w = stdscr.getmaxyx()
-    # Reserve space for PIP timer at bottom if active
-    # PIP is at h-6, height 5. So occupy h-6 to h-1.
-    # Tree starts at 4.
     bottom_margin = 5
     if SESSION['active']: bottom_margin = 11
     
-    list_h = max(1, h - bottom_margin)
+    sel_idx = max(0, min(sel_idx, len(tree)-1))
+    if sel_idx < scroll_idx: scroll_idx = sel_idx
     
     if not tree: 
         safe_addstr(stdscr, 4, 4, "No tasks found.", curses.A_DIM)
-        return
+        return scroll_idx
     
-    # Selection/Scroll clamping
-    sel_idx = max(0, min(sel_idx, len(tree)-1))
-    if sel_idx < scroll_idx: scroll_idx = sel_idx
-    elif sel_idx >= scroll_idx + list_h: scroll_idx = sel_idx - list_h + 1
+    y = 4
+    max_y = h - bottom_margin
+    sel_idx_visible = False
     
-    for i in range(list_h):
+    wrapper = textwrap.TextWrapper(width=max(10, w - 12))
+    
+    for i in range(len(tree) - scroll_idx):
         ii = scroll_idx + i
-        if ii >= len(tree): break
+        if y >= max_y: break
+        
         node = tree[ii]
         is_sel = (ii == sel_idx)
         attr = curses.A_REVERSE if is_sel else 0
+        if is_sel: sel_idx_visible = True
         
         # Margin Asterisk
         show_ast = False
         ast_col = 5
         if node['type'] == 'item':
-            if node['data']['status'] == 'pending': 
+            if node['data'].get('focused', False):
+                 pass 
+            elif node['data']['status'] == 'pending': 
                 show_ast = True; ast_col = p_colors.get(node['data'].get('project', 'General'), 5)
         elif node['type'] in ['project', 'date_group', 'group']:
             if node['done'] < node['total']: 
@@ -1667,7 +1671,7 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
         if show_ast:
             try: col_p = curses.color_pair(ast_col)
             except: col_p = curses.color_pair(5)
-            safe_addstr(stdscr, 4+i, 0, "\U0001F7BA", col_p)
+            safe_addstr(stdscr, y, 0, "\U0001F7BA", col_p)
 
         # Rendering
         if node['type'] == 'group':
@@ -1682,7 +1686,8 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             icon = "[-]" if k in TODO_STATE['expanded_daily'] else "[+]"
             is_past_pending = k < today_str and node['done'] < node['total']
             h_attr = curses.color_pair(5)|curses.A_BOLD if is_past_pending else curses.color_pair(4)
-            safe_addstr(stdscr, 4+i, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|h_attr)
+            safe_addstr(stdscr, y, 2, f"{icon} {lbl:<25} {pct:>3}%", attr|h_attr)
+            y += 1
         
         elif node['type'] == 'project':
             k = node['key']
@@ -1690,7 +1695,8 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             is_open = k in TODO_STATE['expanded_project']
             icon = "[-]" if is_open else "[+]"
             col = curses.color_pair(p_colors.get(k, 3))
-            safe_addstr(stdscr, 4+i, 2, f"{icon} {k:<25} {pct:>3}%", attr|col|curses.A_BOLD)
+            safe_addstr(stdscr, y, 2, f"{icon} {k:<25} {pct:>3}%", attr|col|curses.A_BOLD)
+            y += 1
             
         elif node['type'] == 'date_group':
             d, p_name = node['date'], node['parent']
@@ -1705,8 +1711,9 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             is_backlog = d < today_str and node['done'] < node['total']
             line = ("  ├─" if not node['is_last'] else "  └─") if not is_backlog else ("  ├╌" if not node['is_last'] else "  └╌")
             d_attr = curses.color_pair(5)|curses.A_BOLD if is_backlog else curses.color_pair(4)
-            safe_addstr(stdscr, 4+i, 2, line, col)
-            safe_addstr(stdscr, 4+i, 6, f"{lbl:<23} {pct:>3}%", attr|d_attr)
+            safe_addstr(stdscr, y, 2, line, col)
+            safe_addstr(stdscr, y, 6, f"{lbl:<23} {pct:>3}%", attr|d_attr)
+            y += 1
 
         elif node['type'] == 'item':
             item = node['data']
@@ -1718,26 +1725,55 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             if item.get('focused', False):
                  p_name = item.get('project', 'General')
                  p_col_id = p_colors.get(p_name, 0)
-                 # Invert the project color or use REVERSE
                  col = curses.color_pair(p_col_id) | curses.A_REVERSE if p_col_id else curses.A_REVERSE
 
             t_str = " " + " ".join([f"#{t}" for t in item.get('tags', []) if t])
             
             if TODO_STATE['mode'] == 'DAILY':
                 p_name = item.get('project', 'General')
-                if p_name != "General" and not is_overdue and item['status'] != 'done' and item['id'] not in TODO_STATE.get('focus_queue', []):
+                if p_name != "General" and not is_overdue and item['status'] != 'done' and not item.get('focused', False):
                     try: col = curses.color_pair(p_colors.get(p_name, 0))
                     except: pass
-                safe_addstr(stdscr, 4+i, 4, f"{('╌╌ ' if is_overdue else '   ')}{st} {p_name}: {item['content']}{t_str}", attr|col)
+                
+                content_text = f"{('╌╌ ' if is_overdue else '   ')}{st} {p_name}: {item['content']}{t_str}"
+                lines = wrapper.wrap(content_text)
+                for li, line_text in enumerate(lines):
+                    if y >= max_y: break
+                    safe_addstr(stdscr, y, 4 if li==0 else 8, line_text, attr|col)
+                    y += 1
             else:
                 p_name = node.get('parent', '').split('|')[0]
                 t_col = curses.color_pair(p_colors.get(p_name, 3))
-                line = f"  {'│' if not node.get('parent_last') else ' '}  {'├' if not node.get('is_last') else '└'}{'╌' if item['status'] == 'pending' else '─'}"
-                safe_addstr(stdscr, 4+i, 2, line, t_col)
-                safe_addstr(stdscr, 4+i, 9, f"{st} {item['content']}{t_str}", attr|col)
+                
+                tree_char_1 = '│' if not node.get('parent_last') else ' '
+                tree_char_2 = '├' if not node.get('is_last') else '└'
+                status_char = '╌' if item['status'] == 'pending' else '─'
+                
+                prefix = f"  {tree_char_1}  {tree_char_2}{status_char}"
+                
+                content_text = f"{st} {item['content']}{t_str}"
+                lines = wrapper.wrap(content_text)
+                
+                for li, line_text in enumerate(lines):
+                    if y >= max_y: break
+                    if li == 0:
+                        safe_addstr(stdscr, y, 2, prefix, t_col)
+                        safe_addstr(stdscr, y, 9, line_text, attr|col)
+                    else:
+                        # Continuation
+                        cont_char = '│' if not node.get('is_last') else ' '
+                        cont_prefix = f"  {tree_char_1}  {cont_char} "
+                        safe_addstr(stdscr, y, 2, cont_prefix, t_col)
+                        safe_addstr(stdscr, y, 9, line_text, attr|col)
+                    y += 1
             
         if ii == delete_pending_idx:
-            safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+            # Draw on the last line of the item (y is already incremented)
+            safe_addstr(stdscr, y-1, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
+            
+    if not sel_idx_visible and sel_idx >= scroll_idx and len(tree) > 0:
+        return scroll_idx + 1
+        
     return scroll_idx
 
 def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
