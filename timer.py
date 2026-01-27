@@ -601,79 +601,79 @@ def show_history(stdscr):
     current_date = datetime.now().date()
     
     while True:
-        tick_timer()
-        if time.time() - last_load > 1.0: history = load_history(); last_load = time.time()
-        stdscr.erase(); h, w = stdscr.getmaxyx()
-        
-        # Filter History based on Mode
-        display_history = []
-        if view_mode == 'ALL':
-            display_history = history
-            title_str = "ALL HISTORY"
-        else:
-            display_history = [
-                x for x in history 
-                if x.get('timestamp') and datetime.fromisoformat(x['timestamp']).date() == current_date
-            ]
-            title_str = f"HISTORY: {current_date.strftime('%a %d %b %Y').upper()}"
+        def render(draw_scroll, draw_idx):
+            tick_timer()
+            stdscr.erase(); h, w = stdscr.getmaxyx()
+            
+            # Filter History based on Mode
+            display_history_local = []
+            if view_mode == 'ALL':
+                display_history_local = history
+                title_str = "ALL HISTORY"
+            else:
+                display_history_local = [
+                    x for x in history 
+                    if x.get('timestamp') and datetime.fromisoformat(x['timestamp']).date() == current_date
+                ]
+                title_str = f"HISTORY: {current_date.strftime('%a %d %b %Y').upper()}"
 
-        tt, ty, ratio = calculate_stats()
-        r_str = f"{ratio:.2f}x" if ratio != float('inf') else "INF"
+            tt, ty, ratio = calculate_stats()
+            
+            # Header
+            safe_addstr(stdscr, 0, 2, f"{title_str:<30} | TODAY: {tt:.1f}m | YEST: {ty:.1f}m", curses.color_pair(2)|curses.A_BOLD)
+            
+            # Table Header
+            if use_nerd:
+                header = f"{ ' TIME':<6} | { ' PROJECT':<12} | { ' TASK':<25} | { ' DUR':<5} | { ' STATUS':<10} | {' MULT'}"
+            else:
+                header = f"{ 'TIME':<6} | {'PROJECT':<12} | {'TASK':<25} | {'DUR':<5} | {'STATUS':<10} | {'MULT'}"
+            safe_addstr(stdscr, 2, 2, header, curses.color_pair(3)); safe_addstr(stdscr, 3, 2, "-"*min(len(header), w-2), curses.color_pair(3))
+            
+            list_h_local = max(1, h - 6)
+            
+            # Table Content
+            if not display_history_local:
+                safe_addstr(stdscr, 4, 2, "No sessions found for this period.", curses.A_DIM)
+            else:
+                p_colors = cfg.get('project_colors', {})
+                for i in range(list_h_local):
+                    ii = draw_scroll + i
+                    if ii >= len(display_history_local): break
+                    it = display_history_local[ii]; st = "SUCCESS" if it.get('status')=='completed' else "TERM"
+                    dm = f"{it.get('duration_minutes',0)}m" if st=="SUCCESS" else f"{int(it.get('actual_duration_seconds',0)//60)}m"
+                    
+                    ts = it.get('timestamp', '')
+                    tm_str = ts[11:16] if len(ts) >= 16 else "--:--"
+                    
+                    p_name = it.get('project', '-')
+                    p_color_id = p_colors.get(p_name, 0)
+                    
+                    if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
+                    
+                    # Selection vs Row attribute
+                    attr = curses.color_pair(0) | curses.A_REVERSE if ii == draw_idx else (curses.color_pair(p_color_id) if p_color_id else 0)
+                    
+                    row_str = f"{tm_str:<6} | {p_name[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {'1.0x' if st.endswith('SUCCESS') else '-'}"
+                    safe_addstr(stdscr, 4+i, 2, row_str, attr)
+            
+            # Footer Help
+            nav_help = "[TAB] View  [[] Day -  []] Day +  [Space] Dtls  [N] New  [L] Todo  [D] Del"
+            safe_addstr(stdscr, h-1, 2, f"{nav_help}  [H] Heat  [W] Week  [R] Raid  [P] Pref  [Q] Quit", curses.color_pair(4))
+            
+            draw_pip_timer(stdscr)
+            return display_history_local, list_h_local
+
+        if time.time() - last_load > 1.0: history = load_history(); last_load = time.time()
         
-        # Header
-        safe_addstr(stdscr, 0, 2, f"{title_str:<30} | TODAY: {tt:.1f}m | YEST: {ty:.1f}m", curses.color_pair(2)|curses.A_BOLD)
+        display_history, list_h = render(scroll, idx)
         
-        # Table Header
-        if use_nerd:
-            header = f"{ ' TIME':<6} | { ' PROJECT':<12} | { ' TASK':<25} | { ' DUR':<5} | { ' STATUS':<10} | {' MULT'}"
-        else:
-            header = f"{ 'TIME':<6} | {'PROJECT':<12} | {'TASK':<25} | {'DUR':<5} | {'STATUS':<10} | {'MULT'}"
-        safe_addstr(stdscr, 2, 2, header, curses.color_pair(3)); safe_addstr(stdscr, 3, 2, "-"*min(len(header), w-2), curses.color_pair(3))
-        
-        list_h = max(1, h - 6)
         if not display_history: idx = 0
         else: idx = max(0, min(idx, len(display_history) - 1))
         
         if idx < scroll: scroll = idx
         elif idx >= scroll + list_h: scroll = idx - list_h + 1
         
-        # Table Content
-        if not display_history:
-            safe_addstr(stdscr, 4, 2, "No sessions found for this period.", curses.A_DIM)
-        else:
-            p_colors = cfg.get('project_colors', {})
-            for i in range(list_h):
-                ii = scroll + i
-                if ii >= len(display_history): break
-                it = display_history[ii]; st = "SUCCESS" if it.get('status')=='completed' else "TERM"
-                dm = f"{it.get('duration_minutes',0)}m" if st=="SUCCESS" else f"{int(it.get('actual_duration_seconds',0)//60)}m"
-                
-                # Extract HH:MM
-                ts = it.get('timestamp', '')
-                tm_str = ts[11:16] if len(ts) >= 16 else "--:--"
-                
-                # Project Color logic
-                p_name = it.get('project', '-')
-                p_color_id = p_colors.get(p_name, 0)
-                
-                if use_nerd: st = " SUCCESS" if st=="SUCCESS" else " TERM"
-                
-                # Selection vs Row attribute
-                if ii == idx:
-                    # Use standard high-contrast selection (Black/White) to ensure readability
-                    attr = curses.color_pair(0) | curses.A_REVERSE
-                else:
-                    attr = curses.color_pair(p_color_id) if p_color_id else 0
-                
-                # Row content
-                row_str = f"{tm_str:<6} | {p_name[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {'1.0x' if st.endswith('SUCCESS') else '-'}"
-                safe_addstr(stdscr, 4+i, 2, row_str, attr)
-        
-        # Footer Help
-        nav_help = "[TAB] View  [[] Day -  []] Day +  [Space] Dtls  [N] New  [L] Todo  [D] Del"
-        safe_addstr(stdscr, h-1, 2, f"{nav_help}  [H] Heat  [W] Week  [R] Raid  [P] Pref  [Q] Quit", curses.color_pair(4))
-        
-        draw_pip_timer(stdscr); stdscr.refresh(); k = stdscr.getch()
+        stdscr.refresh(); k = stdscr.getch()
         if k == -1: continue
         nav = check_nav_keys(k); 
         if nav: return nav
@@ -710,25 +710,26 @@ def show_history(stdscr):
         elif k == curses.KEY_DOWN: idx += 1
         elif k == ord(' ') and display_history:
              if 0 <= idx < len(display_history):
-                 # Adapt history item to task data structure
                  item = display_history[idx]
-                 # Try to find the original task content in todos to get tags/desc if possible?
-                 # But history items are snapshots. We'll use what we have.
-                 
-                 # Create a mock tree node compatible with show_neobrutalist_popup
                  mock_data = {
                      'id': item.get('id', 'history'),
                      'project': item.get('project', 'General'),
                      'content': item.get('task', 'No Task'),
                      'date': datetime.fromisoformat(item['timestamp']).strftime("%Y-%m-%d"),
                      'status': 'DONE' if item.get('status')=='completed' else 'TERM',
-                     'tags': [], # History doesn't store tags by default currently, unless we change save_session
+                     'tags': [], 
                      'meta_label': f" DURATION: {item.get('duration_minutes', 0) if item.get('status')=='completed' else int(item.get('actual_duration_seconds',0)/60)}m ",
                      'description': f"Logged on: {datetime.fromisoformat(item['timestamp']).strftime('%Y-%m-%d %H:%M')}"
                  }
                  
-                 mock_tree = [{'type': 'item', 'data': mock_data}]
-                 show_neobrutalist_popup(stdscr, mock_tree, 0)
+                 while True:
+                     render(scroll, idx)
+                     draw_neobrutalist_card(stdscr, mock_data, cfg.get('project_colors', {}))
+                     curses.curs_set(0)
+                     stdscr.refresh()
+                     k2 = stdscr.getch()
+                     if k2 in [ord(' '), 27]: break
+                     time.sleep(0.05)
 
 def show_timer_view(stdscr):
     btn = 0
