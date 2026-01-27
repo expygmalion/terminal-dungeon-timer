@@ -65,7 +65,8 @@ TODO_STATE = {
     'backlog_active': False,
     'isolation_filter': None,
     'isolation_type': None,
-    'active_filter': None
+    'active_filter': None,
+    'focus_queue': []
 }
 
 # --- Data Management ---
@@ -92,6 +93,7 @@ def add_todo(content, date_str, project, tags, description=""):
         "project": project if project else "General",
         "tags": clean_tags(tags),
         "status": "pending",
+        "focused": False,
         "timestamp": datetime.now().isoformat()
     }
     todos.append(new_todo)
@@ -242,12 +244,26 @@ def load_config():
 def save_config(cfg):
     with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=2)
 
-def get_unique_projects():
-    history = load_history()
+def get_project_tags(project_name):
     cfg = load_config()
-    hist_projs = set(i['project'] for i in history if i.get('project'))
-    cfg_projs = set(cfg.get('project_tags', {}).keys())
-    return sorted(list(hist_projs.union(cfg_projs)))
+    return cfg.get('project_tags', {}).get(project_name, [])
+
+def get_unique_projects():
+    todos = load_todos()
+    proj_map = {} # project -> latest_timestamp
+    for t in todos:
+        p = t.get('project', 'General')
+        ts = t.get('timestamp', '')
+        if p not in proj_map or ts > proj_map[p]:
+            proj_map[p] = ts
+    
+    # Sort by timestamp descending
+    sorted_p = sorted(proj_map.keys(), key=lambda x: proj_map[x], reverse=True)
+    
+    # Ensure General is always present
+    if "General" not in sorted_p: sorted_p.append("General")
+    
+    return sorted_p
 
 def get_unique_tasks(project_name):
     history = load_history()
@@ -372,22 +388,38 @@ def safe_addstr(stdscr, y, x, text, attr=0):
 
 def draw_pip_timer(stdscr):
     if not SESSION['active']: return
-    h, w = stdscr.getmaxyx(); pip_w = 24; start_x = w - pip_w - 1
+    h, w = stdscr.getmaxyx()
+    
+    proj = SESSION['project']
+    task = SESSION['task']
+    xp = SESSION['duration_secs'] // 60
+    
+    width = max(30, min(w-4, len(task) + 4), min(w-4, len(proj) + 15))
+    height = 5
+    
+    y = h - 6
+    x = (w - width) // 2
+    
+    if y < 0: return
+
     if SESSION['state'] == 'running': elapsed = SESSION['elapsed_before_pause'] + (time.time() - SESSION['start_time'])
     else: elapsed = SESSION['elapsed_before_pause']
     rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
+    
     color = curses.color_pair(4)
     if SESSION['state'] == 'paused': color = curses.color_pair(6)
     elif SESSION['state'] == 'finished': color = curses.color_pair(2)
+    
     try:
-        stdscr.attron(color)
-        stdscr.addstr(0, start_x, "╭" + "─"*(pip_w-2) + "╮")
-        stdscr.addstr(1, start_x, "│" + " "*(pip_w-2) + "│")
-        stdscr.addstr(2, start_x, "╰" + "─"*(pip_w-2) + "╯")
+        draw_box(stdscr, y, x, height, width, "ACTIVE TIMER")
+        
+        header = f"{proj[:20]} | {int(xp)} XP"
+        safe_addstr(stdscr, y+1, x+2, header, curses.A_BOLD | curses.color_pair(2))
+        
+        safe_addstr(stdscr, y+2, x+2, task[:width-4])
+        
         icon = "▶" if SESSION['state']=='running' else ("⏸" if SESSION['state']=='paused' else "✔")
-        txt = f"{icon} {t_str} [T]"
-        stdscr.addstr(1, start_x + (pip_w-len(txt))//2, txt)
-        stdscr.attroff(color)
+        safe_addstr(stdscr, y+3, x + (width - len(t_str) - 4)//2, f"{icon} {t_str}", color | curses.A_BOLD)
     except: pass
 
 def check_nav_keys(key):
@@ -395,8 +427,8 @@ def check_nav_keys(key):
     if key in [ord('w'), ord('W')]: return 'WEEKLY'
     if key in [ord('r'), ord('R')]: return 'RAID'
     if key in [ord('i'), ord('I')]: return 'INFO'
-    if key in [ord('s'), ord('S')]: return 'SETTINGS'
-    if key in [ord('t'), ord('T')] and SESSION['active']: return 'TIMER'
+    if key in [ord('p'), ord('P')]: return 'SETTINGS'
+    if key in [ord('t'), ord('T')]: return 'TIMER'
     if key in [ord('l'), ord('L')]: return 'TODO'
     return None
 
@@ -404,57 +436,33 @@ def is_subsequence(q, t):
     it = iter(t.lower()); q = q.lower().replace(" ", "")
     return all(c in it for c in q)
 
-def text_input(stdscr, y, x, prompt, default=""):
-    curses.curs_set(1); inp = default
+def text_input(stdscr, y, x, prompt, prefill=""):
+    query = prefill
+    stdscr.nodelay(True)
     while True:
-        tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
-        h, w = stdscr.getmaxyx()
-        
-        # Dynamic width
-        box_w = min(80, w - 4)
-        box_x = (w - box_w) // 2
-        
-        draw_box(stdscr, y, box_x, 3, box_w, prompt)
-        
-        # Scroll text
-        display_limit = box_w - 4
-        display_text = inp
-        if len(inp) > display_limit:
-            display_text = inp[-(display_limit):]
-            
-        safe_addstr(stdscr, y+1, box_x+2, display_text)
+        # Render prompt + current query
+        safe_addstr(stdscr, y, x, " " * (len(prompt) + 40)) # Clear line
+        safe_addstr(stdscr, y, x, f"{prompt} {query}")
+        safe_addstr(stdscr, y, x + len(prompt) + 1 + len(query), "_", curses.A_BLINK)
         stdscr.refresh()
-        stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
-        if k == -1: time.sleep(0.05); continue
-        if k in [10, 13]: curses.curs_set(0); return inp
-        elif k == 27: curses.curs_set(0); return None
-        elif k in [curses.KEY_BACKSPACE, 127, 8]: inp = inp[:-1]
-        elif 32 <= k <= 126 and len(inp) < 500: inp += chr(k)
-
-def fuzzy_select(stdscr, y, x, prompt, options):
-    curses.curs_set(1); inp = ""; sel = 0
-    while True:
-        tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
-        filt = [o for o in options if is_subsequence(inp, o)] if inp else options[:]
-        sel = max(0, min(sel, len(filt)-1)) if filt else -1
-        draw_box(stdscr, y, x, 3, 34, prompt); stdscr.addstr(y+1, x+2, inp)
-        start = max(0, sel - 7)
-        for i in range(8):
-            if start+i >= len(filt): break
-            attr = curses.A_REVERSE if start+i==sel else 0
-            safe_addstr(stdscr, y+3+i, x, f"{ ' > ' if start+i==sel else '   '}{filt[start+i]}", attr)
-        stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
-        if k == -1: time.sleep(0.05); continue
-        if k in [10, 13]:
-            if sel >= 0 and filt:
-                if inp == filt[sel]: curses.curs_set(0); return filt[sel]
-                inp = filt[sel]
-            elif inp: curses.curs_set(0); return inp
-        elif k == 27: curses.curs_set(0); return None
-        elif k == curses.KEY_UP: sel -= 1
-        elif k == curses.KEY_DOWN: sel += 1
-        elif k in [curses.KEY_BACKSPACE, 127, 8]: inp = inp[:-1]; sel = 0
-        elif 32 <= k <= 126 and len(inp) < 30: inp += chr(k); sel = 0
+        
+        k = stdscr.getch()
+        if k == -1: time.sleep(0.02); continue
+        
+        # Check for Alt+Left (Back) - commonly 542 or ESC + KEY_LEFT
+        if k == 542 or k == 543: return (query, "BACK") # 543 is Alt+Right, 542 is Alt+Left
+        
+        if k == 27: # Potential Alt sequence or ESC
+            stdscr.nodelay(True)
+            k2 = stdscr.getch()
+            if k2 == curses.KEY_LEFT: return (query, "BACK")
+            if k2 == curses.KEY_RIGHT: return (query, "NEXT")
+            if k2 == -1: return (None, "CANCEL") # True ESC
+        
+        if k in [10, 13]: return (query, "NEXT")
+        elif k in [127, 8, curses.KEY_BACKSPACE]: query = query[:-1]
+        elif 32 <= k <= 126: query += chr(k)
+    stdscr.nodelay(False)
 
 def select_duration(stdscr):
     h, w = stdscr.getmaxyx(); opts = PRESETS + ["Custom"]; sel = 0
@@ -518,14 +526,14 @@ def show_settings(stdscr):
             if sel == 0: # Manage Projects
                 while True:
                     projs = get_unique_projects() + ["+ ADD NEW PROJECT"]
-                    p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT PROJECT", projs)
+                    p, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT PROJECT", projs)
                     if not p: break
 
                     if p == "+ ADD NEW PROJECT":
                         new_p = text_input(stdscr, h//2, w//2 - 20, "PROJECT NAME:")
                         if new_p: add_project(new_p); cfg = load_config()
                     elif p:
-                        act = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {p}", ["Edit Tags", "Edit Color", "Delete Project", "Cancel"])
+                        act, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {p}", ["Edit Tags", "Edit Color", "Delete Project", "Cancel"])
                         if act == "Edit Tags":
                             curr_tags = cfg['project_tags'].get(p, [])
                             val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
@@ -551,7 +559,7 @@ def show_settings(stdscr):
                             stdscr.timeout(50)
             elif sel == 1: # Manage Classes
                 cls_names = [c['name'] for c in cfg['classes']] + ["+ ADD NEW CLASS"]
-                c = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT CLASS", cls_names)
+                c, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT CLASS", cls_names)
                 if c == "+ ADD NEW CLASS":
                     name = text_input(stdscr, h//2, w//2 - 20, "NEW CLASS NAME:")
                     if name:
@@ -561,7 +569,7 @@ def show_settings(stdscr):
                 elif c:
                     cls = next((x for x in cfg['classes'] if x['name'] == c), None)
                     if cls:
-                        act = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {c}", ["Edit Name", "Edit Tags", "Delete Class", "Cancel"])
+                        act, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {c}", ["Edit Name", "Edit Tags", "Delete Class", "Cancel"])
                         if act == "Edit Name":
                             new_name = text_input(stdscr, h//2, w//2 - 20, "NEW NAME:", cls['name'])
                             if new_name: cls['name'] = new_name
@@ -660,8 +668,8 @@ def show_history(stdscr):
                 safe_addstr(stdscr, 4+i, 2, row_str, attr)
         
         # Footer Help
-        nav_help = "[TAB] View  [[] Day -  []] Day +  [N] New  [L] Todo  [D] Del"
-        safe_addstr(stdscr, h-1, 2, f"{nav_help}  [H] Heat  [W] Week  [R] Raid  [S] Set  [Q] Quit", curses.color_pair(4))
+        nav_help = "[TAB] View  [[] Day -  []] Day +  [Space] Dtls  [N] New  [L] Todo  [D] Del"
+        safe_addstr(stdscr, h-1, 2, f"{nav_help}  [H] Heat  [W] Week  [R] Raid  [P] Pref  [Q] Quit", curses.color_pair(4))
         
         draw_pip_timer(stdscr); stdscr.refresh(); k = stdscr.getch()
         if k == -1: continue
@@ -695,56 +703,157 @@ def show_history(stdscr):
                         real_idx = ri; break
                 if real_idx != -1:
                     delete_session(real_idx); history = load_history()
-        elif k in [ord('q'), ord('Q')]: return 'QUIT'
+        if k in [ord('q'), ord('Q')]: return 'QUIT'
         elif k == curses.KEY_UP: idx -= 1
         elif k == curses.KEY_DOWN: idx += 1
+        elif k == ord(' ') and display_history:
+             if 0 <= idx < len(display_history):
+                 # Adapt history item to task data structure
+                 item = display_history[idx]
+                 # Try to find the original task content in todos to get tags/desc if possible?
+                 # But history items are snapshots. We'll use what we have.
+                 
+                 # Create a mock tree node compatible with show_neobrutalist_popup
+                 mock_data = {
+                     'id': item.get('id', 'history'),
+                     'project': item.get('project', 'General'),
+                     'content': item.get('task', 'No Task'),
+                     'date': datetime.fromisoformat(item['timestamp']).strftime("%Y-%m-%d"),
+                     'status': 'DONE' if item.get('status')=='completed' else 'TERM',
+                     'tags': [], # History doesn't store tags by default currently, unless we change save_session
+                     'description': f"Logged on: {datetime.fromisoformat(item['timestamp']).strftime('%Y-%m-%d %H:%M')}\nDuration: {item.get('duration_minutes',0)} minutes"
+                 }
+                 
+                 mock_tree = [{'type': 'item', 'data': mock_data}]
+                 show_neobrutalist_popup(stdscr, mock_tree, 0)
 
 def show_timer_view(stdscr):
     btn = 0
+    focus_idx = 0
+    active_section = 'CONTROLS' # 'CONTROLS' or 'FOCUS'
+    
     while True:
         tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx()
-        if not SESSION['active']: return 'HISTORY'
         
-        cfg = load_config()
-        p_color_id = cfg.get('project_colors', {}).get(SESSION['project'], 0)
-        p_attr = curses.color_pair(p_color_id) if p_color_id else 0
+        # We need space for the Focus List. 
+        # Layout:
+        # Top Left: Timer Details
+        # Top Right (or Bottom): PIP Timer is handled by draw_pip_timer (now at bottom)
+        # So we can use the main area.
         
-        draw_box(stdscr, 1, 2, 6, max(40, w - 35), "DETAILS")
-        safe_addstr(stdscr, 2, 4, f"PROJECT: {SESSION['project']}", p_attr|curses.A_BOLD)
-        safe_addstr(stdscr, 3, 4, f"TASK:    {SESSION['task']}")
-        draw_box(stdscr, 1, max(40, w - 35) + 3, 6, 30, "SYSTEM"); safe_addstr(stdscr, 3, max(40, w - 35) + 5, f"{datetime.now().strftime('%H:%M:%S')}")
-        elapsed = SESSION['elapsed_before_pause'] + (time.time()-SESSION['start_time'] if SESSION['state']=='running' else 0)
-        rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
-        color = curses.color_pair(4) if SESSION['state']=='running' else curses.color_pair(6)
-        if SESSION['state']=='finished': color = curses.color_pair(2)
-        draw_big_text(stdscr, h//2 - 2, w//2 - 28, t_str if SESSION['show_colon'] else t_str.replace(":"," "), color)
-        bar_y = h//2 + 7; bar_w = min(60, w - 10)
-        if bar_w > 0:
-            draw_box(stdscr, bar_y - 1, w//2 - bar_w//2 - 2, 3, bar_w + 4)
-            pct = 1.0 - (rem / SESSION['duration_secs']) if SESSION['duration_secs'] > 0 else 1.0
-            if SESSION['state'] == 'finished': pct = 1.0
-            fld = int(bar_w * pct)
-            safe_addstr(stdscr, bar_y, w//2 - bar_w//2, "█"*fld + "░"*(bar_w-fld), curses.color_pair(3))
-        safe_addstr(stdscr, bar_y+3, w//2 - 10, f"STATUS: {SESSION['state'].upper()}", color|curses.A_BOLD)
-        btns = ["MENU", "RESTART", "QUIT"] if SESSION['state']=='finished' else ["PAUSE" if SESSION['state']=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
-        t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = w//2 - t_w//2
-        for i, lbl in enumerate(btns):
-            safe_addstr(stdscr, h-4, x, f"[ {lbl} ]", curses.color_pair(1)|(curses.A_REVERSE if i==btn else 0)); x += len(lbl)+6
+        # Draw Focus List
+        # Resolve items
+        todos = load_todos()
+        f_items = [t for t in todos if t.get('focused', False)]
+        
+        # Split Screen: Left = Timer, Right = Quick Start
+        split_x = w // 2
+        
+        # --- LEFT SIDE: CURRENT TIMER ---
+        if SESSION['active']:
+            cfg = load_config()
+            p_color_id = cfg.get('project_colors', {}).get(SESSION['project'], 0)
+            p_attr = curses.color_pair(p_color_id) if p_color_id else 0
+            
+            draw_box(stdscr, 1, 2, 6, split_x - 4, "DETAILS")
+            safe_addstr(stdscr, 2, 4, f"PROJECT: {SESSION['project']}", p_attr|curses.A_BOLD)
+            safe_addstr(stdscr, 3, 4, f"TASK:    {SESSION['task']}")
+            
+            elapsed = SESSION['elapsed_before_pause'] + (time.time()-SESSION['start_time'] if SESSION['state']=='running' else 0)
+            rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
+            color = curses.color_pair(4) if SESSION['state']=='running' else curses.color_pair(6)
+            if SESSION['state']=='finished': color = curses.color_pair(2)
+            
+            draw_big_text(stdscr, h//2 - 4, (split_x - 30)//2, t_str if SESSION['show_colon'] else t_str.replace(":"," "), color)
+            
+            # Progress Bar
+            bar_y = h//2 + 5; bar_w = split_x - 10
+            if bar_w > 0:
+                draw_box(stdscr, bar_y - 1, 2, 3, bar_w + 4)
+                pct = 1.0 - (rem / SESSION['duration_secs']) if SESSION['duration_secs'] > 0 else 1.0
+                if SESSION['state'] == 'finished': pct = 1.0
+                fld = int(bar_w * pct)
+                safe_addstr(stdscr, bar_y, 4, "█"*fld + "░"*(bar_w-fld), curses.color_pair(3))
+            
+            safe_addstr(stdscr, bar_y+3, 4, f"STATUS: {SESSION['state'].upper()}", color|curses.A_BOLD)
+
+            # Controls
+            btns = ["MENU", "RESTART", "QUIT"] if SESSION['state']=='finished' else ["PAUSE" if SESSION['state']=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
+            t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = (split_x - t_w)//2
+            for i, lbl in enumerate(btns):
+                attr = curses.color_pair(1)
+                if active_section == 'CONTROLS' and i == btn: attr |= curses.A_REVERSE
+                safe_addstr(stdscr, h-10, x, f"[ {lbl} ]", attr); x += len(lbl)+6
+        else:
+             safe_addstr(stdscr, 5, 5, "NO ACTIVE TIMER", curses.A_DIM)
+             safe_addstr(stdscr, 7, 5, "Select a task from the list to start.", curses.A_BOLD)
+
+        # --- RIGHT SIDE: FOCUS LIST ---
+        draw_box(stdscr, 1, split_x, h-8, w - split_x - 1, "QUICK START LIST")
+        if not f_items:
+            safe_addstr(stdscr, 3, split_x + 2, "No focused tasks.", curses.A_DIM)
+            safe_addstr(stdscr, 4, split_x + 2, "Press 'f' in Todo List to add.", curses.A_DIM)
+        else:
+            list_h = h - 12
+            # Scroll logic if needed? For now simple list
+            for i, item in enumerate(f_items[:list_h]):
+                attr = 0
+                if active_section == 'FOCUS' and i == focus_idx: attr = curses.A_REVERSE
+                safe_addstr(stdscr, 3+i, split_x + 2, f"• {item['content'][:30]}", attr)
+
+        # Active Section Highlight Border?
+        # Maybe just cursor is enough.
+        
+        draw_pip_timer(stdscr) # Renders at bottom
+        
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1: time.sleep(0.05); continue
+        
         nav = check_nav_keys(k); 
         if nav and nav != 'TIMER': return nav
-        if k == curses.KEY_LEFT: btn = max(0, btn - 1)
-        elif k == curses.KEY_RIGHT: btn = min(len(btns)-1, btn + 1)
-        elif k in [10, 13]:
-            sel = btns[btn]
-            if sel in ["BACK", "MENU"]: return 'HISTORY'
-            elif sel == "QUIT": terminate_session(); return 'QUIT'
-            elif sel == "STOP": terminate_session(); return 'HISTORY'
-            elif sel == "RESTART": terminate_session(); start_new_session(SESSION['project'], SESSION['task'], SESSION['duration_secs']//60); return 'TIMER'
-            elif sel == "RESUME": resume_timer()
-            elif sel == "PAUSE": pause_timer()
-        elif k == 27: return 'HISTORY'
+        
+        if k == 9: # TAB
+            active_section = 'FOCUS' if active_section == 'CONTROLS' else 'CONTROLS'
+        
+        elif active_section == 'CONTROLS' and SESSION['active']:
+            if k == curses.KEY_LEFT: btn = max(0, btn - 1)
+            elif k == curses.KEY_RIGHT: btn = min(len(btns)-1, btn + 1)
+            elif k in [10, 13]:
+                sel = btns[btn]
+                if sel in ["BACK", "MENU"]: return 'HISTORY'
+                elif sel == "QUIT": terminate_session(); return 'QUIT'
+                elif sel == "STOP": terminate_session(); return 'HISTORY'
+                elif sel == "RESTART": terminate_session(); start_new_session(SESSION['project'], SESSION['task'], SESSION['duration_secs']//60); return 'TIMER'
+                elif sel == "RESUME": resume_timer()
+                elif sel == "PAUSE": pause_timer()
+        
+        elif active_section == 'FOCUS':
+            if k == curses.KEY_UP: focus_idx = max(0, focus_idx - 1)
+            elif k == curses.KEY_DOWN: focus_idx = min(len(f_items)-1, focus_idx + 1)
+            elif k == ord(' ') and f_items:
+                # Show details for focused item
+                item = f_items[focus_idx]
+                # Reuse show_neobrutalist_popup logic? It needs a tree and index.
+                # We can mock a tree.
+                mock_tree = [{'type': 'item', 'data': item}]
+                show_neobrutalist_popup(stdscr, mock_tree, 0)
+            elif k in [10, 13] and f_items:
+                # Start Selected Task
+                target = f_items[focus_idx]
+                # If timer active, ask to stop? Or just overwrite?
+                # "Quick add them to the timer". "Start a timer".
+                # Let's overwrite.
+                if SESSION['active']: terminate_session()
+                # Default duration or prompt?
+                # "User can select tasks directly". Usually implies immediate action.
+                # Let's prompt for duration briefly or default 25.
+                # Prompting is safer.
+                d = select_duration(stdscr)
+                if d:
+                    start_new_session(target.get('project', 'General'), target['content'], d)
+                    active_section = 'CONTROLS' # Switch focus to timer controls
+
+        if k == 27: return 'HISTORY'
 
 def show_yearly_heatmap(stdscr):
     if curses.can_change_color():
@@ -932,7 +1041,7 @@ def show_info_screen(stdscr):
         if y+4 < h-2: safe_addstr(stdscr, y+4, x+3, "▒  (Med)", curses.color_pair(8)|curses.A_DIM)
         y += 6
         if y < h-2: safe_addstr(stdscr, y, x, "3. CONTROLS", curses.color_pair(11)|curses.A_BOLD)
-        keys = [("[N]","New"), ("[L]","Todo"), ("[T]","Timer"), ("[H]","Heatmap"), ("[W]","Dungeon"), ("[R]","Raid"), ("[D]","Delete"), ("[S]","Settings")]
+        keys = [("[N]","New"), ("[L]","Todo"), ("[T]","Timer"), ("[H]","Heatmap"), ("[W]","Dungeon"), ("[R]","Raid"), ("[D]","Delete"), ("[P]","Prefs")]
         for i, (k, desc) in enumerate(keys):
             if y+1+(i//2) < h-2: 
                 col = 3 if i%2==0 else 25
@@ -1001,58 +1110,235 @@ def select_color(stdscr, y, x):
         elif k in [10, 13]: return 30 + sel # Return Color Pair ID
         elif k == 27: return None # Cancel
 
+def fuzzy_select(stdscr, y, x, title, options, p_colors=None, header_list=None):
+    if not options: return (None, "NEXT")
+    query = ""
+    sel_idx = 0
+    box_h = 12 if not header_list else 14
+    stdscr.nodelay(True)
+    while True:
+        matches = [o for o in options if not query or query.lower() in o.lower()]
+        if sel_idx >= len(matches): sel_idx = max(0, len(matches)-1)
+        
+        # Clear area
+        for i in range(box_h): safe_addstr(stdscr, y+i, x, " " * 45)
+        
+        draw_box(stdscr, y, x, box_h, 45, title)
+        
+        y_off = 2
+        if header_list:
+            h_str = ", ".join(header_list)
+            if len(h_str) > 38: h_str = "..." + h_str[-35:]
+            safe_addstr(stdscr, y+y_off, x+2, f"PICKED: {h_str}", curses.color_pair(2)|curses.A_BOLD)
+            y_off += 2
+            
+        safe_addstr(stdscr, y+y_off, x+2, "SEARCH: " + query)
+        safe_addstr(stdscr, y+y_off, x+10+len(query), "_", curses.A_BLINK)
+        
+        for i, m in enumerate(matches[:7]):
+            attr = curses.A_REVERSE if i == sel_idx else 0
+            if p_colors and m in p_colors:
+                 attr |= curses.color_pair(p_colors[m])
+            safe_addstr(stdscr, y+y_off+2+i, x+4, f" {m} ", attr)
+            
+        stdscr.refresh()
+        k = stdscr.getch()
+        if k == -1: time.sleep(0.02); continue
+        
+        if k == 542: return (None, "BACK") # Alt+Left
+        if k == 543: return (None, "NEXT") # Alt+Right
+        if k == 27:
+            k2 = stdscr.getch()
+            if k2 == curses.KEY_LEFT: return (None, "BACK")
+            if k2 == curses.KEY_RIGHT: return (None, "NEXT")
+            if k2 == -1: return (None, "CANCEL")
+            
+        if k in [10, 13]: return (matches[sel_idx] if matches else None, "NEXT")
+        elif k == curses.KEY_UP: sel_idx = max(0, sel_idx - 1)
+        elif k == curses.KEY_DOWN: sel_idx = min(len(matches)-1, sel_idx + 1)
+        elif k in [127, 8, curses.KEY_BACKSPACE]: query = query[:-1]; sel_idx = 0
+        elif 32 <= k <= 126: query += chr(k); sel_idx = 0
+    stdscr.nodelay(False)
+
+def select_date_dialog(stdscr, y, x):
+    today = datetime.now()
+    options = []
+    for i in range(6):
+        target = today + timedelta(days=i)
+        label = "Today" if i == 0 else ("Tomorrow" if i == 1 else f"In {i} days")
+        date_str = target.strftime("%Y-%m-%d")
+        display = f"{label:<12} ({target.strftime('%a %d %b')})"
+        options.append((display, date_str))
+    
+    options.append(("Custom...", "CUSTOM"))
+    
+    choice, action = fuzzy_select(stdscr, y, x, "SELECT DATE", [o[0] for o in options])
+    if action != "NEXT": return (None, action)
+    if choice is None: return (None, "CANCEL")
+    
+    for display, date_str in options:
+        if display == choice:
+            if date_str == "CUSTOM":
+                res, a = text_input(stdscr, y, x, "ENTER DATE (YYYY-MM-DD):", today.strftime("%Y-%m-%d"))
+                return (res, a)
+            return (date_str, "NEXT")
+    return (None, "CANCEL")
+
+def card_text_input(stdscr, y, x, prompt, attr, prefill=""):
+    query = prefill
+    stdscr.nodelay(True)
+    while True:
+        # Render prompt + current query
+        safe_addstr(stdscr, y, x, " " * (len(prompt) + 40))
+        safe_addstr(stdscr, y, x, f"{prompt} {query}", attr)
+        safe_addstr(stdscr, y, x + len(prompt) + 1 + len(query), "_", attr | curses.A_BLINK)
+        stdscr.refresh()
+        
+        k = stdscr.getch()
+        if k == -1: time.sleep(0.02); continue
+        
+        if k == 542: return (query, "BACK")
+        if k == 543: return (query, "NEXT")
+        if k == 27:
+            k2 = stdscr.getch()
+            if k2 == curses.KEY_LEFT: return (query, "BACK")
+            if k2 == curses.KEY_RIGHT: return (query, "NEXT")
+            if k2 == -1: return (None, "CANCEL")
+            
+        if k in [10, 13]: return (query, "NEXT")
+        elif k in [127, 8, curses.KEY_BACKSPACE]: query = query[:-1]
+        elif 32 <= k <= 126: query += chr(k)
+    stdscr.nodelay(False)
+
+def multi_select_tags(stdscr, y, x, title, existing_tags, selected=None):
+    if selected is None: selected = []
+    while True:
+        options = ["[ DONE ]", "[ + ADD MANUAL ]"] + [t for t in existing_tags if t not in selected]
+        res, action = fuzzy_select(stdscr, y, x, title, options, header_list=selected)
+        
+        if action != "NEXT": return (selected, action)
+        if res is None or res == "[ DONE ]": return (selected, "NEXT")
+        if res == "[ + ADD MANUAL ]":
+            manual, m_action = card_text_input(stdscr, y + 14, x, "NEW TAG:", curses.A_REVERSE)
+            if m_action == "BACK": return (selected, "BACK")
+            if manual:
+                new_tags = [t.strip().upper() for t in manual.split(',') if t.strip()]
+                selected.extend(new_tags)
+        else:
+            selected.append(res)
+
 def add_new_todo_dialog(stdscr):
     h, w = stdscr.getmaxyx()
-    content = text_input(stdscr, h//2 - 6, w//2 - 20, "TASK CONTENT (ESC to Cancel):")
-    if content is None: return
-    if not content.strip(): return
+    card_w, card_h = min(84, int(w * 0.9)), min(26, int(h * 0.9))
+    cy, cx = (h - card_h) // 2, (w - card_w) // 2
     
-    desc = text_input(stdscr, h//2 - 4, w//2 - 20, "DESCRIPTION (Optional):")
-    if desc is None: desc = ""
+    cfg = load_config()
+    p_colors = cfg.get('project_colors', {})
+    all_projs = get_unique_projects() + ["+ NEW PROJECT"]
     
-    today = datetime.now().strftime("%Y-%m-%d")
-    d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "DATE (ESC to Cancel):", today)
-    if d_str is None: return
-    if not d_str: d_str = today
+    state = {
+        'project': None, 'content': "", 'description': "", 
+        'tags': [], 'date': None, 'color_id': 4
+    }
     
-    projs = ["General"] + get_unique_projects() + ["+ NEW PROJECT"]
-    p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "PROJECT (ESC to Cancel)", projs)
-    if p is None: return
-    
-    new_proj_color = None
-    new_proj_tags = []
-    
-    if p == "+ NEW PROJECT":
-        p = text_input(stdscr, h//2 + 2, w//2 - 20, "NEW PROJECT NAME:")
-        if not p: return
+    steps = ['PROJECT', 'NAME', 'DESCRIPTION', 'TAGS', 'DATE', 'CONFIRM']
+    cur_step = 0
+
+    def draw_base_card(color_id, title):
+        stdscr.erase(); draw_pip_timer(stdscr)
+        for y in range(cy + 1, cy + card_h + 1): safe_addstr(stdscr, y, cx + 2, " " * card_w, curses.color_pair(8))
+        attr = curses.color_pair(color_id) | curses.A_REVERSE | curses.A_BOLD
+        for y in range(cy, cy + card_h): safe_addstr(stdscr, y, cx, " " * card_w, attr)
+        safe_addstr(stdscr, cy+1, cx+2, f"  {title}  ", curses.color_pair(0)|curses.A_BOLD)
+        return attr
+
+    while 0 <= cur_step < len(steps):
+        step = steps[cur_step]
         
-        # Project Tags
-        p_tags_str = text_input(stdscr, h//2 + 4, w//2 - 20, "PROJECT TAGS (comma sep):")
-        if p_tags_str is None: return
-        new_proj_tags = [t.strip() for t in p_tags_str.split(',')] if p_tags_str else []
-        
-        # Select Color for new project
-        curses.flushinp()
-        new_proj_color = select_color(stdscr, h//2 - 5, w//2 + 22)
-    
-    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "TASK TAGS (ESC to Cancel):")
-    if tags_str is None: return
-    tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
-    
-    # Confirmation
-    msg = " SAVE TASK? (y/n/Enter) "
-    safe_addstr(stdscr, h-1, 2, " " * (w-3))
-    safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
-    stdscr.refresh()
-    stdscr.timeout(-1)
-    k = stdscr.getch()
-    stdscr.timeout(50)
-    if k in [ord('y'), ord('Y'), 10, 13]:
-        add_todo(content, d_str, p, tags, desc)
-        if new_proj_color or new_proj_tags or p not in projs:
-             # Even if no color/tags, we need to save the new project entry
-             add_project(p, new_proj_color, new_proj_tags)
-        return p
+        if step == 'PROJECT':
+            sel_idx = 0
+            if state['project'] in all_projs: sel_idx = all_projs.index(state['project'])
+            while True:
+                p_name = all_projs[sel_idx]; c_id = p_colors.get(p_name, 4)
+                if p_name == "+ NEW PROJECT": c_id = 0
+                main_attr = draw_base_card(c_id, "STEP 1: SELECT PROJECT")
+                for i, p in enumerate(all_projs[:15]):
+                    p_attr = curses.A_REVERSE if i == sel_idx else 0
+                    p_col = p_colors.get(p, 0)
+                    if i != sel_idx and p_col:
+                        try: p_attr |= curses.color_pair(p_col)
+                        except: pass
+                    safe_addstr(stdscr, cy+4+i, cx+4, f" {p} ", p_attr)
+                stdscr.refresh()
+                k = stdscr.getch()
+                if k == 27: return None # Exit dialog
+                elif k == 542: return None # Back from first step
+                elif k == curses.KEY_UP: sel_idx = max(0, sel_idx - 1)
+                elif k == curses.KEY_DOWN: sel_idx = min(len(all_projs)-1, sel_idx + 1)
+                elif k in [10, 13]:
+                    if all_projs[sel_idx] == "+ NEW PROJECT":
+                        res, a = text_input(stdscr, cy+4, cx+4, "NEW PROJECT NAME:")
+                        if a == "CANCEL": return None
+                        if res:
+                            state['project'] = res
+                            state['color_id'] = select_color(stdscr, cy+6, cx+4) or 4
+                            add_project(state['project'], state['color_id'], [])
+                    else:
+                        state['project'] = all_projs[sel_idx]
+                        state['color_id'] = c_id
+                    cur_step += 1; break
+
+        elif step == 'NAME':
+            main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
+            res, action = card_text_input(stdscr, cy+5, cx+4, "TASK NAME:", main_attr, prefill=state['content'])
+            if action == "CANCEL": return None
+            state['content'] = res or ""
+            cur_step += (1 if action == "NEXT" else -1)
+
+        elif step == 'DESCRIPTION':
+            main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
+            safe_addstr(stdscr, cy+5, cx+4, f"NAME: {state['content']}", main_attr)
+            res, action = card_text_input(stdscr, cy+7, cx+4, "DESCRIPTION:", main_attr, prefill=state['description'])
+            if action == "CANCEL": return None
+            state['description'] = res or ""
+            cur_step += (1 if action == "NEXT" else -1)
+
+        elif step == 'TAGS':
+            main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
+            safe_addstr(stdscr, cy+5, cx+4, f"NAME: {state['content']}", main_attr)
+            safe_addstr(stdscr, cy+7, cx+4, f"DESC: {state['description'][:40]}...", main_attr)
+            proj_tags = get_project_tags(state['project'])
+            res, action = multi_select_tags(stdscr, cy+9, cx+4, "SELECT TAGS", proj_tags, selected=state['tags'])
+            if action == "CANCEL": return None
+            state['tags'] = res
+            cur_step += (1 if action == "NEXT" else -1)
+
+        elif step == 'DATE':
+            main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
+            safe_addstr(stdscr, cy+5, cx+4, f"NAME: {state['content']}", main_attr)
+            safe_addstr(stdscr, cy+7, cx+4, f"DESC: {state['description'][:40]}...", main_attr)
+            safe_addstr(stdscr, cy+9, cx+4, f"TAGS: {' '.join(['#'+t for t in state['tags']])}", main_attr)
+            res, action = select_date_dialog(stdscr, cy+11, cx+4)
+            if action == "CANCEL": return None
+            state['date'] = res
+            cur_step += (1 if action == "NEXT" else -1)
+
+        elif step == 'CONFIRM':
+            main_attr = draw_base_card(state['color_id'], "CONFIRM TASK")
+            safe_addstr(stdscr, cy+4, cx+4, f"PROJECT: {state['project']}", main_attr)
+            safe_addstr(stdscr, cy+6, cx+4, f"NAME:    {state['content']}", main_attr)
+            safe_addstr(stdscr, cy+8, cx+4, f"DATE:    {state['date']}", main_attr)
+            safe_addstr(stdscr, cy+10, cx+4, f"TAGS:    {' '.join(['#'+t for t in state['tags']])}", main_attr)
+            msg = " [ENTER] TO SAVE  [ALT+LEFT] TO GO BACK  [ESC] DISCARD "
+            safe_addstr(stdscr, cy+card_h-3, cx+(card_w-len(msg))//2, msg, curses.color_pair(0)|curses.A_BOLD)
+            stdscr.refresh()
+            while True:
+                k = stdscr.getch()
+                if k in [10, 13]:
+                    add_todo(state['content'], state['date'], state['project'], state['tags'], state['description'])
+                    return state['project']
+                elif k == 27: return None
+                elif k == 542: cur_step -= 1; break
     return None
 
 
@@ -1094,7 +1380,7 @@ def edit_todo_dialog(stdscr, item):
     # 4. Project
     # We can't easily pre-select in fuzzy_select, so we let user choose again or keep current
     projs = ["KEEP CURRENT (" + orig_proj + ")"] + ["General"] + get_unique_projects() + ["+ NEW PROJECT"]
-    p = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "EDIT PROJECT", projs)
+    p, _ = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "EDIT PROJECT", projs)
     if p is None: return False
     
     final_proj = orig_proj
@@ -1263,7 +1549,14 @@ def tag_filtering_dialog(stdscr):
 
 def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx):
     h, w = stdscr.getmaxyx()
-    list_h = h - 5
+    # Reserve space for PIP timer at bottom if active
+    # PIP is at h-6, height 5. So occupy h-6 to h-1.
+    # Tree starts at 4.
+    bottom_margin = 5
+    if SESSION['active']: bottom_margin = 11
+    
+    list_h = max(1, h - bottom_margin)
+    
     if not tree: 
         safe_addstr(stdscr, 4, 4, "No tasks found.", curses.A_DIM)
         return
@@ -1339,11 +1632,19 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             st = "[x]" if item['status']=='done' else "[ ]"
             is_overdue = (item.get('date', '9999-99-99') < today_str) and (item['status'] == 'pending')
             col = curses.color_pair(2) if item['status'] == 'done' else (curses.color_pair(5) if is_overdue else 0)
+            
+            # Focus Highlighting
+            if item.get('focused', False):
+                 p_name = item.get('project', 'General')
+                 p_col_id = p_colors.get(p_name, 0)
+                 # Invert the project color or use REVERSE
+                 col = curses.color_pair(p_col_id) | curses.A_REVERSE if p_col_id else curses.A_REVERSE
+
             t_str = " " + " ".join([f"#{t}" for t in item.get('tags', []) if t])
             
             if TODO_STATE['mode'] == 'DAILY':
                 p_name = item.get('project', 'General')
-                if p_name != "General" and not is_overdue and item['status'] != 'done':
+                if p_name != "General" and not is_overdue and item['status'] != 'done' and item['id'] not in TODO_STATE.get('focus_queue', []):
                     try: col = curses.color_pair(p_colors.get(p_name, 0))
                     except: pass
                 safe_addstr(stdscr, 4+i, 4, f"{('╌╌ ' if is_overdue else '   ')}{st} {p_name}: {item['content']}{t_str}", attr|col)
@@ -1440,13 +1741,18 @@ def show_neobrutalist_popup(stdscr, tree, start_idx):
             while tmp < len(tree) and tree[tmp]['type'] != 'item': tmp += 1
             if tmp < len(tree): idx = tmp
         elif k in [10, 13, 529]:
-            dur = 30
-            if k == 529:
+            # Guard against history items or non-toggleable items
+            if item.get('id') == 'history': return idx 
+            
+            dur = 15
+            if k in [10, 529]:
                 dur = select_duration(stdscr)
                 if dur is None: dur = 0
             if dur > 0:
                 toggle_todo(item['id'], dur)
-                tree[idx]['data'] = next(t for t in load_todos() if t['id'] == item['id'])
+                try:
+                    tree[idx]['data'] = next(t for t in load_todos() if t['id'] == item['id'])
+                except: pass
 
 
 def show_todo_list(stdscr):
@@ -1528,7 +1834,7 @@ def show_todo_list(stdscr):
 
         # 3. Apply Backlog Filter (on top of isolation)
         if backlog_active:
-            todos = [t for t in todos if t.get('date', '9999-99-99') <= today_str]
+            todos = [t for t in todos if t.get('date', '9999-99-99') <= today_str and t['status'] == 'pending']
 
         tree = []
         if mode == 'DAILY':
@@ -1545,7 +1851,7 @@ def show_todo_list(stdscr):
                 # In isolation mode, auto-expand the single root logic or just respect expanded
                 # If isolated by date, we only have one group, so auto-expand it?
                 # Let's respect standard expanded logic but maybe default expand if isolated?
-                if k in expanded or (isolation_filter and isolation_type == 'date'):
+                if k in expanded or (isolation_filter and isolation_type == 'date') or backlog_active:
                     for item in items:
                         tree.append({'type': 'item', 'data': item, 'parent': k})
         else: # PROJECT MODE (Restructured: Project -> Date -> Task)
@@ -1568,7 +1874,7 @@ def show_todo_list(stdscr):
                 # Auto-expand if isolated by project
                 is_isolated_proj = (isolation_filter == p and isolation_type == 'project')
                 
-                if p in expanded or is_isolated_proj:
+                if p in expanded or is_isolated_proj or backlog_active:
                     # Group by Date inside Project
                     d_groups = {}
                     for t in p_items:
@@ -1594,10 +1900,15 @@ def show_todo_list(stdscr):
                         # Auto-expand if isolated by specific date_group
                         is_isolated_dg = (isolation_filter == d_key and isolation_type == 'date_group')
                         
-                        if d_key in expanded or is_isolated_dg:
+                        if d_key in expanded or is_isolated_dg or backlog_active:
                             for i_t, item in enumerate(d_items):
                                 is_last_item = (i_t == len(d_items) - 1)
                                 tree.append({'type': 'item', 'data': item, 'parent': d_key, 'is_last': is_last_item, 'parent_last': is_last_date})
+
+        # Ensure sel_idx is within bounds
+        if not tree: sel_idx = 0
+        elif sel_idx >= len(tree): sel_idx = len(tree) - 1
+        if sel_idx < 0: sel_idx = 0
 
         # Tabs Header
         tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
@@ -1637,7 +1948,7 @@ def show_todo_list(stdscr):
         scroll_idx = draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx)
         
         nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
-        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [X/C] Exp/Col All  [F] Filter  [I] Isolate  [SPACE] Details  [N] New  [E] Edit  [Enter] Toggle  [D] Del  [U] Undo  [ESC] Back", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [f] Focus  [S] Start  [F] Filter  [I] Isolate  [Space] Dtls  [Enter] Toggle  [D] Del  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
@@ -1645,14 +1956,57 @@ def show_todo_list(stdscr):
         
         nav = check_nav_keys(k)
         if nav and nav != 'TODO' and nav != 'INFO': return nav
-        
+
+        if k == ord('f'):
+            if tree and 0 <= sel_idx < len(tree):
+                node = tree[sel_idx]
+                todos_all = load_todos()
+                changed = False
+                
+                if node['type'] == 'item':
+                    t_id = node['data']['id']
+                    for t in todos_all:
+                        if t['id'] == t_id:
+                            t['focused'] = not t.get('focused', False)
+                            changed = True; break
+                elif node['type'] in ['group', 'project', 'date_group']:
+                     # Get all IDs currently visible in this branch
+                     child_ids = []
+                     curr = sel_idx + 1
+                     while curr < len(tree):
+                         child = tree[curr]
+                         if child.get('parent') == node['key'] or child.get('parent') == f"{node.get('key')}|{node.get('date')}" or (node['type']=='project' and child.get('parent', '').startswith(node['key'])):
+                             if child['type'] == 'item':
+                                 child_ids.append(child['data']['id'])
+                         else: break
+                         curr += 1
+                     
+                     if child_ids:
+                         for t in todos_all:
+                             if t['id'] in child_ids:
+                                 t['focused'] = True # Set all to focused if toggling group
+                                 changed = True
+                
+                if changed:
+                    save_todos(todos_all)
+
+        if k in [ord('s'), ord('S')]:
+             if tree and 0 <= sel_idx < len(tree):
+                 node = tree[sel_idx]
+                 if node['type'] == 'item':
+                     item = node['data']
+                     d = select_duration(stdscr)
+                     if d:
+                         start_new_session(item.get('project', 'General'), item['content'], d)
+                         return 'TIMER'
+
         if k == ord(' '):
             if tree and 0 <= sel_idx < len(tree):
                 node = tree[sel_idx]
                 if node['type'] == 'item':
                     sel_idx = show_neobrutalist_popup(stdscr, tree, sel_idx)
         
-        if k in [ord('f'), ord('F')]:
+        if k == ord('F'):
             if active_filter:
                 # Prompt to clear
                 safe_addstr(stdscr, h-2, 2, " " * (w-1))
@@ -1741,8 +2095,8 @@ def show_todo_list(stdscr):
                 else:
                     item = node['data']
                     if item['status'] == 'pending':
-                        # If Ctrl+Enter, prompt for time. Otherwise default 30.
-                        duration = 30
+                        # If Ctrl+Enter, prompt for time. Otherwise default 15.
+                        duration = 15
                         if k in [10, 529]:
                             duration = select_duration(stdscr)
                             if duration is None: # Cancelled
@@ -1804,7 +2158,7 @@ def main(stdscr):
         elif view == 'TODO': view = show_todo_list(stdscr)
         elif view == 'NEW':
             stdscr.erase(); h, w = stdscr.getmaxyx()
-            p = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects())
+            p, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects())
             if not p: view = 'HISTORY'; continue
             
             # Merge pending todos + history tasks
@@ -1819,7 +2173,7 @@ def main(stdscr):
             
             all_tasks = pending_todos + history_tasks
             
-            t = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "TASK", all_tasks)
+            t, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "TASK", all_tasks)
             if not t: view = 'HISTORY'; continue
             d = select_duration(stdscr)
             if not d: view = 'HISTORY'; continue
