@@ -450,7 +450,9 @@ def text_input(stdscr, y, x, prompt, prefill=""):
         if k == -1: time.sleep(0.02); continue
         
         # Check for Alt+Left (Back) - commonly 542 or ESC + KEY_LEFT
-        if k == 542 or k == 543: return (query, "BACK") # 543 is Alt+Right, 542 is Alt+Left
+        if k == 542: return (query, "BACK")
+        if k == 543: return (query, "NEXT")
+        if k == 9: return (query, "NEXT") # TAB
         
         if k == 27: # Potential Alt sequence or ESC
             stdscr.nodelay(True)
@@ -530,13 +532,13 @@ def show_settings(stdscr):
                     if not p: break
 
                     if p == "+ ADD NEW PROJECT":
-                        new_p = text_input(stdscr, h//2, w//2 - 20, "PROJECT NAME:")
+                        new_p, _ = text_input(stdscr, h//2, w//2 - 20, "PROJECT NAME:")
                         if new_p: add_project(new_p); cfg = load_config()
                     elif p:
                         act, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {p}", ["Edit Tags", "Edit Color", "Delete Project", "Cancel"])
                         if act == "Edit Tags":
                             curr_tags = cfg['project_tags'].get(p, [])
-                            val = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
+                            val, _ = text_input(stdscr, h//2, w//2 - 20, f"TAGS FOR '{p}' (comma sep):", ",".join(curr_tags))
                             if val is not None:
                                 cfg['project_tags'][p] = [t.strip() for t in val.split(',') if t.strip()]
                                 save_config(cfg)
@@ -561,9 +563,9 @@ def show_settings(stdscr):
                 cls_names = [c['name'] for c in cfg['classes']] + ["+ ADD NEW CLASS"]
                 c, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "SELECT CLASS", cls_names)
                 if c == "+ ADD NEW CLASS":
-                    name = text_input(stdscr, h//2, w//2 - 20, "NEW CLASS NAME:")
+                    name, _ = text_input(stdscr, h//2, w//2 - 20, "NEW CLASS NAME:")
                     if name:
-                        tags = text_input(stdscr, h//2 + 4, w//2 - 20, "KEYWORDS (comma sep):")
+                        tags, _ = text_input(stdscr, h//2 + 4, w//2 - 20, "KEYWORDS (comma sep):")
                         if tags:
                             cfg['classes'].append({"name": name, "tags": [t.strip() for t in tags.split(',') if t.strip()]})
                 elif c:
@@ -571,10 +573,10 @@ def show_settings(stdscr):
                     if cls:
                         act, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, f"MANAGE {c}", ["Edit Name", "Edit Tags", "Delete Class", "Cancel"])
                         if act == "Edit Name":
-                            new_name = text_input(stdscr, h//2, w//2 - 20, "NEW NAME:", cls['name'])
+                            new_name, _ = text_input(stdscr, h//2, w//2 - 20, "NEW NAME:", cls['name'])
                             if new_name: cls['name'] = new_name
                         elif act == "Edit Tags":
-                            tags = text_input(stdscr, h//2, w//2 - 20, "TAGS (comma sep):", ",".join(cls['tags']))
+                            tags, _ = text_input(stdscr, h//2, w//2 - 20, "TAGS (comma sep):", ",".join(cls['tags']))
                             if tags is not None: cls['tags'] = [t.strip() for t in tags.split(',') if t.strip()]
                         elif act == "Delete Class":
                             msg = f" DELETE CLASS '{c}'? (y/n) "
@@ -1189,6 +1191,7 @@ def card_text_input(stdscr, y, x, prompt, attr, prefill=""):
         
         if k == 542: return (query, "BACK")
         if k == 543: return (query, "NEXT")
+        if k == 9: return (query, "NEXT") # TAB
         if k == 27:
             k2 = stdscr.getch()
             if k2 == curses.KEY_LEFT: return (query, "BACK")
@@ -1347,72 +1350,80 @@ def update_todo(todo_id, content, date_str, project, tags, description):
 
 def edit_todo_dialog(stdscr, item):
     h, w = stdscr.getmaxyx()
-    # Pre-fill
-    orig_content = item['content']
-    orig_desc = item.get('description', '')
-    orig_date = item.get('date', '')
-    orig_proj = item.get('project', 'General')
-    orig_tags = ",".join(item.get('tags', []))
+    # State copy
+    state = item.copy()
+    # Ensure all keys exist
+    for k in ['content', 'description', 'date', 'project', 'tags', 'status']:
+        if k not in state: state[k] = "" if k != 'tags' else []
+    if 'tags' not in state or state['tags'] is None: state['tags'] = []
     
-    # 1. Content
-    content = text_input(stdscr, h//2 - 6, w//2 - 20, "EDIT TASK CONTENT:", orig_content)
-    if content is None: return False
-    if not content.strip(): return False
+    cfg = load_config()
+    p_colors = cfg.get('project_colors', {})
     
-    # 2. Description
-    desc = text_input(stdscr, h//2 - 4, w//2 - 20, "EDIT DESCRIPTION:", orig_desc)
-    if desc is None: desc = ""
+    fields = ['PROJECT', 'DATE', 'TAGS', 'CONTENT', 'DESCRIPTION', 'SAVE']
+    active_idx = 0
     
-    # 3. Date
-    d_str = text_input(stdscr, h//2 - 2, w//2 - 20, "EDIT DATE:", orig_date)
-    if d_str is None: return False
-    
-    # 4. Project
-    # We can't easily pre-select in fuzzy_select, so we let user choose again or keep current
-    projs = ["KEEP CURRENT (" + orig_proj + ")"] + ["General"] + get_unique_projects() + ["+ NEW PROJECT"]
-    p, _ = fuzzy_select(stdscr, h//2 + 2, w//2 - 20, "EDIT PROJECT", projs)
-    if p is None: return False
-    
-    final_proj = orig_proj
-    new_proj_color = None
-    new_proj_tags = []
-    
-    if p.startswith("KEEP CURRENT"):
-        final_proj = orig_proj
-    elif p == "+ NEW PROJECT":
-        final_proj = text_input(stdscr, h//2 + 2, w//2 - 20, "NEW PROJECT NAME:")
-        if not final_proj: return False
+    while True:
+        tick_timer(); stdscr.erase(); draw_pip_timer(stdscr)
         
-        # New Project Setup
-        p_tags_str = text_input(stdscr, h//2 + 4, w//2 - 20, "PROJECT TAGS (comma sep):")
-        new_proj_tags = [t.strip() for t in p_tags_str.split(',')] if p_tags_str else []
-        curses.flushinp()
-        new_proj_color = select_color(stdscr, h//2 - 5, w//2 + 22)
-    else:
-        final_proj = p
-
-    # 5. Tags
-    tags_str = text_input(stdscr, h//2 + 6, w//2 - 20, "EDIT TAGS (comma sep):", orig_tags)
-    if tags_str is None: return False
-    tags = [t.strip() for t in tags_str.split(',')] if tags_str else []
-    
-    # Save
-    msg = " SAVE CHANGES? (y/n/Enter) "
-    safe_addstr(stdscr, h-1, 2, " " * (w-3))
-    safe_addstr(stdscr, h-1, 2, msg, curses.color_pair(5) | curses.A_BOLD)
-    stdscr.refresh()
-    stdscr.timeout(-1)
-    k = stdscr.getch()
-    stdscr.timeout(50)
-    
-    if k in [ord('y'), ord('Y'), 10, 13]:
-        # Handle new project creation if needed
-        if p == "+ NEW PROJECT":
-             add_project(final_proj, new_proj_color, new_proj_tags)
+        # Draw Card
+        draw_neobrutalist_card(stdscr, state, p_colors, fields[active_idx])
         
-        update_todo(item['id'], content, d_str, final_proj, tags, desc)
-        return True
-    
+        # Save Button Hint
+        if fields[active_idx] == 'SAVE':
+            msg = " PRESS [ENTER] TO SAVE CHANGES "
+            safe_addstr(stdscr, h-2, (w-len(msg))//2, msg, curses.color_pair(2)|curses.A_BOLD|curses.A_REVERSE)
+        else:
+            safe_addstr(stdscr, h-2, 2, "[TAB] Next Field  [ENTER] Edit Field  [ESC] Cancel", curses.A_DIM)
+            
+        stdscr.refresh()
+        k = stdscr.getch()
+        
+        if k == 9: # TAB
+            active_idx = (active_idx + 1) % len(fields)
+        elif k == 353: # Shift+TAB (approx)
+            active_idx = (active_idx - 1) % len(fields)
+        elif k == 27: return False # Cancel
+        elif k in [10, 13]: # Enter
+            field = fields[active_idx]
+            
+            if field == 'CONTENT':
+                res, _ = text_input(stdscr, h//2, w//2 - 20, "EDIT CONTENT:", state['content'])
+                if res: state['content'] = res
+            
+            elif field == 'DESCRIPTION':
+                res, _ = text_input(stdscr, h//2, w//2 - 20, "EDIT DESCRIPTION:", state['description'])
+                if res is not None: state['description'] = res
+            
+            elif field == 'DATE':
+                # Reuse select_date_dialog? It uses fuzzy_select which clears screen.
+                # It's fine, we redraw on loop.
+                res, action = select_date_dialog(stdscr, h//2, w//2 - 20)
+                if action != 'CANCEL': state['date'] = res
+            
+            elif field == 'PROJECT':
+                projs = ["General"] + get_unique_projects() + ["+ NEW PROJECT"]
+                p, _ = fuzzy_select(stdscr, h//2, w//2 - 20, "SELECT PROJECT", projs)
+                if p == "+ NEW PROJECT":
+                    new_p, _ = text_input(stdscr, h//2, w//2 - 20, "NEW PROJECT NAME:")
+                    if new_p:
+                        state['project'] = new_p
+                        # Optional color/tags for new project?
+                        # For simplicity, just set name. User can manage via Settings later.
+                        # Or simple prompt
+                        add_project(new_p)
+                elif p:
+                    state['project'] = p
+            
+            elif field == 'TAGS':
+                proj_tags = get_project_tags(state['project'])
+                res, action = multi_select_tags(stdscr, h//2, w//2 - 20, "EDIT TAGS", proj_tags, selected=state['tags'])
+                if action != 'CANCEL': state['tags'] = res
+            
+            elif field == 'SAVE':
+                update_todo(item['id'], state['content'], state['date'], state['project'], state['tags'], state['description'])
+                return True
+                
     return False
 
 def get_all_used_tags():
@@ -1649,7 +1660,7 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
     return scroll_idx
 
-def draw_neobrutalist_card(stdscr, item, p_colors):
+def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
     h, w = stdscr.getmaxyx()
     card_w, card_h = min(84, int(w * 0.9)), min(26, int(h * 0.9))
     cy, cx = (h - card_h) // 2, (w - card_w) // 2
@@ -1664,17 +1675,29 @@ def draw_neobrutalist_card(stdscr, item, p_colors):
         
     # Stickers
     st_attr = curses.color_pair(0) | curses.A_BOLD
-    safe_addstr(stdscr, cy+1, cx+2, f"  {p_name.upper()}  ", st_attr)
-    safe_addstr(stdscr, cy+2, cx+4, f" {item.get('date', 'NA')} ", st_attr)
+    p_attr = st_attr | curses.A_REVERSE if active_field == 'PROJECT' else st_attr
+    safe_addstr(stdscr, cy+1, cx+2, f"  {p_name.upper()}  ", p_attr)
+    
+    d_attr = st_attr | curses.A_REVERSE if active_field == 'DATE' else st_attr
+    safe_addstr(stdscr, cy+2, cx+4, f" {item.get('date', 'NA')} ", d_attr)
+    
     status = item.get('status', 'PENDING').upper()
     s_col = curses.color_pair(2 if status == 'DONE' or status == 'COMPLETED' else 5)
     safe_addstr(stdscr, cy+1, cx+card_w-len(status)-6, f" {status} ", s_col | curses.A_BOLD | curses.A_REVERSE)
     
-    # Dynamic Meta Label (Reward/Duration)
+    # Dynamic Meta Label
     meta = item.get('meta_label', " REWARD: 30 XP ")
     safe_addstr(stdscr, cy+2, cx+card_w-len(meta)-4, meta, st_attr)
     
+    # Tags
+    tags = item.get('tags', [])
+    t_str = " ".join([f"#{t}" for t in tags]) if tags else "NO TAGS"
+    if len(t_str) > card_w - 8: t_str = t_str[:card_w-11] + "..."
+    t_attr = st_attr | curses.A_REVERSE if active_field == 'TAGS' else st_attr
+    safe_addstr(stdscr, cy+3, cx+4, t_str, t_attr)
+    
     # Content
+    c_attr = main_attr | curses.color_pair(4) if active_field == 'CONTENT' else main_attr
     content, inner_w = item.get('content', ''), card_w - 8
     lines = []
     # Split by newline first
@@ -1687,12 +1710,18 @@ def draw_neobrutalist_card(stdscr, item, p_colors):
             r_line = r_line[split:].strip()
         lines.append(r_line)
 
-    for i, line in enumerate(lines[:5]): safe_addstr(stdscr, cy+5+i, cx+4, line, main_attr)
+    for i, line in enumerate(lines[:5]): safe_addstr(stdscr, cy+5+i, cx+4, line, c_attr)
     
     desc = item.get('description', '')
-    if desc:
+    if desc or active_field == 'DESCRIPTION':
         safe_addstr(stdscr, cy+11, cx+2, "▀" * (card_w-4), main_attr)
-        safe_addstr(stdscr, cy+12, cx+4, "DESCRIPTION:", main_attr|curses.A_UNDERLINE)
+        desc_h_attr = main_attr | curses.A_UNDERLINE
+        if active_field == 'DESCRIPTION': desc_h_attr |= curses.color_pair(4)
+        safe_addstr(stdscr, cy+12, cx+4, "DESCRIPTION:", desc_h_attr)
+        
+        desc_b_attr = main_attr
+        if active_field == 'DESCRIPTION': desc_b_attr |= curses.color_pair(4)
+        
         d_lines = []
         raw_d_lines = desc.split('\n')
         for r_line in raw_d_lines:
@@ -1703,7 +1732,7 @@ def draw_neobrutalist_card(stdscr, item, p_colors):
                 r_line = r_line[split:].strip()
             d_lines.append(r_line)
             
-        for i, line in enumerate(d_lines[:8]): safe_addstr(stdscr, cy+14+i, cx+4, line, main_attr)
+        for i, line in enumerate(d_lines[:8]): safe_addstr(stdscr, cy+14+i, cx+4, line, desc_b_attr)
 
 def show_neobrutalist_popup(stdscr, tree, start_idx):
     idx = start_idx
