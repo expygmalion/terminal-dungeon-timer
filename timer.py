@@ -733,78 +733,72 @@ def show_timer_view(stdscr):
     active_section = 'CONTROLS' # 'CONTROLS' or 'FOCUS'
     
     while True:
-        tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx()
-        
-        # We need space for the Focus List. 
-        # Layout:
-        # Top Left: Timer Details
-        # Top Right (or Bottom): PIP Timer is handled by draw_pip_timer (now at bottom)
-        # So we can use the main area.
-        
-        # Draw Focus List
-        # Resolve items
-        todos = load_todos()
-        f_items = [t for t in todos if t.get('focused', False)]
-        
-        # Split Screen: Left = Timer, Right = Quick Start
-        split_x = w // 2
-        
-        # --- LEFT SIDE: CURRENT TIMER ---
-        if SESSION['active']:
-            cfg = load_config()
-            p_color_id = cfg.get('project_colors', {}).get(SESSION['project'], 0)
-            p_attr = curses.color_pair(p_color_id) if p_color_id else 0
+        def render():
+            tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx()
             
-            draw_box(stdscr, 1, 2, 6, split_x - 4, "DETAILS")
-            safe_addstr(stdscr, 2, 4, f"PROJECT: {SESSION['project']}", p_attr|curses.A_BOLD)
-            safe_addstr(stdscr, 3, 4, f"TASK:    {SESSION['task']}")
+            # Draw Focus List
+            focus_list = TODO_STATE.get('focus_queue', [])
+            todos = load_todos()
+            f_items_local = [t for t in todos if t.get('focused', False)]
             
-            elapsed = SESSION['elapsed_before_pause'] + (time.time()-SESSION['start_time'] if SESSION['state']=='running' else 0)
-            rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
-            color = curses.color_pair(4) if SESSION['state']=='running' else curses.color_pair(6)
-            if SESSION['state']=='finished': color = curses.color_pair(2)
+            split_x = w // 2
             
-            draw_big_text(stdscr, h//2 - 4, (split_x - 30)//2, t_str if SESSION['show_colon'] else t_str.replace(":"," "), color)
-            
-            # Progress Bar
-            bar_y = h//2 + 5; bar_w = split_x - 10
-            if bar_w > 0:
-                draw_box(stdscr, bar_y - 1, 2, 3, bar_w + 4)
-                pct = 1.0 - (rem / SESSION['duration_secs']) if SESSION['duration_secs'] > 0 else 1.0
-                if SESSION['state'] == 'finished': pct = 1.0
-                fld = int(bar_w * pct)
-                safe_addstr(stdscr, bar_y, 4, "█"*fld + "░"*(bar_w-fld), curses.color_pair(3))
-            
-            safe_addstr(stdscr, bar_y+3, 4, f"STATUS: {SESSION['state'].upper()}", color|curses.A_BOLD)
+            # --- LEFT SIDE: CURRENT TIMER ---
+            if SESSION['active']:
+                cfg = load_config()
+                p_color_id = cfg.get('project_colors', {}).get(SESSION['project'], 0)
+                p_attr = curses.color_pair(p_color_id) if p_color_id else 0
+                
+                draw_box(stdscr, 1, 2, 6, split_x - 4, "DETAILS")
+                safe_addstr(stdscr, 2, 4, f"PROJECT: {SESSION['project']}", p_attr|curses.A_BOLD)
+                safe_addstr(stdscr, 3, 4, f"TASK:    {SESSION['task']}")
+                
+                elapsed = SESSION['elapsed_before_pause'] + (time.time()-SESSION['start_time'] if SESSION['state']=='running' else 0)
+                rem = max(0, SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
+                color = curses.color_pair(4) if SESSION['state']=='running' else curses.color_pair(6)
+                if SESSION['state']=='finished': color = curses.color_pair(2)
+                
+                draw_big_text(stdscr, h//2 - 4, (split_x - 30)//2, t_str if SESSION['show_colon'] else t_str.replace(":"," "), color)
+                
+                # Progress Bar
+                bar_y = h//2 + 5; bar_w = split_x - 10
+                if bar_w > 0:
+                    draw_box(stdscr, bar_y - 1, 2, 3, bar_w + 4)
+                    pct = 1.0 - (rem / SESSION['duration_secs']) if SESSION['duration_secs'] > 0 else 1.0
+                    if SESSION['state'] == 'finished': pct = 1.0
+                    fld = int(bar_w * pct)
+                    safe_addstr(stdscr, bar_y, 4, "█"*fld + "░"*(bar_w-fld), curses.color_pair(3))
+                
+                safe_addstr(stdscr, bar_y+3, 4, f"STATUS: {SESSION['state'].upper()}", color|curses.A_BOLD)
 
-            # Controls
-            btns = ["MENU", "RESTART", "QUIT"] if SESSION['state']=='finished' else ["PAUSE" if SESSION['state']=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
-            t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = (split_x - t_w)//2
-            for i, lbl in enumerate(btns):
-                attr = curses.color_pair(1)
-                if active_section == 'CONTROLS' and i == btn: attr |= curses.A_REVERSE
-                safe_addstr(stdscr, h-10, x, f"[ {lbl} ]", attr); x += len(lbl)+6
-        else:
-             safe_addstr(stdscr, 5, 5, "NO ACTIVE TIMER", curses.A_DIM)
-             safe_addstr(stdscr, 7, 5, "Select a task from the list to start.", curses.A_BOLD)
+                # Controls
+                btns = ["MENU", "RESTART", "QUIT"] if SESSION['state']=='finished' else ["PAUSE" if SESSION['state']=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
+                t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = (split_x - t_w)//2
+                for i, lbl in enumerate(btns):
+                    attr = curses.color_pair(1)
+                    if active_section == 'CONTROLS' and i == btn: attr |= curses.A_REVERSE
+                    safe_addstr(stdscr, h-10, x, f"[ {lbl} ]", attr); x += len(lbl)+6
+            else:
+                 safe_addstr(stdscr, 5, 5, "NO ACTIVE TIMER", curses.A_DIM)
+                 safe_addstr(stdscr, 7, 5, "Select a task from the list to start.", curses.A_BOLD)
 
-        # --- RIGHT SIDE: FOCUS LIST ---
-        draw_box(stdscr, 1, split_x, h-8, w - split_x - 1, "QUICK START LIST")
-        if not f_items:
-            safe_addstr(stdscr, 3, split_x + 2, "No focused tasks.", curses.A_DIM)
-            safe_addstr(stdscr, 4, split_x + 2, "Press 'f' in Todo List to add.", curses.A_DIM)
-        else:
-            list_h = h - 12
-            # Scroll logic if needed? For now simple list
-            for i, item in enumerate(f_items[:list_h]):
-                attr = 0
-                if active_section == 'FOCUS' and i == focus_idx: attr = curses.A_REVERSE
-                safe_addstr(stdscr, 3+i, split_x + 2, f"• {item['content'][:30]}", attr)
+            # --- RIGHT SIDE: FOCUS LIST ---
+            draw_box(stdscr, 1, split_x, h-8, w - split_x - 1, "QUICK START LIST")
+            if not f_items_local:
+                safe_addstr(stdscr, 3, split_x + 2, "No focused tasks.", curses.A_DIM)
+                safe_addstr(stdscr, 4, split_x + 2, "Press 'f' in Todo List to add.", curses.A_DIM)
+            else:
+                list_h = h - 12
+                # Scroll logic if needed? For now simple list
+                for i, item in enumerate(f_items_local[:list_h]):
+                    attr = 0
+                    if active_section == 'FOCUS' and i == focus_idx: attr |= curses.A_REVERSE
+                    safe_addstr(stdscr, 3+i, split_x + 2, f"• {item['content'][:30]}", attr)
+            
+            draw_pip_timer(stdscr)
+            return f_items_local, btns if SESSION['active'] else []
 
-        # Active Section Highlight Border?
-        # Maybe just cursor is enough.
-        
-        draw_pip_timer(stdscr) # Renders at bottom
+        f_items, btns = render()
         
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1: time.sleep(0.05); continue
@@ -831,27 +825,22 @@ def show_timer_view(stdscr):
             if k == curses.KEY_UP: focus_idx = max(0, focus_idx - 1)
             elif k == curses.KEY_DOWN: focus_idx = min(len(f_items)-1, focus_idx + 1)
             elif k == ord(' ') and f_items:
-                # Show details for focused item
                 item = f_items[focus_idx]
-                # Reuse show_neobrutalist_popup logic? It needs a tree and index.
-                # We can mock a tree.
-                mock_tree = [{'type': 'item', 'data': item}]
-                show_neobrutalist_popup(stdscr, mock_tree, 0)
+                cfg = load_config()
+                while True:
+                    render()
+                    draw_neobrutalist_card(stdscr, item, cfg.get('project_colors', {}))
+                    stdscr.refresh()
+                    k2 = stdscr.getch()
+                    if k2 in [ord(' '), 27]: break
+                    time.sleep(0.05)
             elif k in [10, 13] and f_items:
-                # Start Selected Task
                 target = f_items[focus_idx]
-                # If timer active, ask to stop? Or just overwrite?
-                # "Quick add them to the timer". "Start a timer".
-                # Let's overwrite.
                 if SESSION['active']: terminate_session()
-                # Default duration or prompt?
-                # "User can select tasks directly". Usually implies immediate action.
-                # Let's prompt for duration briefly or default 25.
-                # Prompting is safer.
                 d = select_duration(stdscr)
                 if d:
                     start_new_session(target.get('project', 'General'), target['content'], d)
-                    active_section = 'CONTROLS' # Switch focus to timer controls
+                    active_section = 'CONTROLS' 
 
         if k == 27: return 'HISTORY'
 
@@ -1659,6 +1648,58 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             safe_addstr(stdscr, 4+i, w-25, " PRESS 'D' AGAIN TO DELETE ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
     return scroll_idx
 
+def draw_neobrutalist_card(stdscr, item, p_colors):
+    h, w = stdscr.getmaxyx()
+    card_w, card_h = min(84, int(w * 0.9)), min(26, int(h * 0.9))
+    cy, cx = (h - card_h) // 2, (w - card_w) // 2
+    
+    p_name = item.get('project', 'General')
+    p_col_id = p_colors.get(p_name, 4)
+    
+    # Shadow & Body
+    for y in range(cy + 1, cy + card_h + 1): safe_addstr(stdscr, y, cx + 2, " " * card_w, curses.color_pair(8))
+    main_attr = curses.color_pair(p_col_id) | curses.A_REVERSE | curses.A_BOLD
+    for y in range(cy, cy + card_h): safe_addstr(stdscr, y, cx, " " * card_w, main_attr)
+        
+    # Stickers
+    st_attr = curses.color_pair(0) | curses.A_BOLD
+    safe_addstr(stdscr, cy+1, cx+2, f"  {p_name.upper()}  ", st_attr)
+    safe_addstr(stdscr, cy+2, cx+4, f" {item.get('date', 'NA')} ", st_attr)
+    status = item.get('status', 'PENDING').upper()
+    s_col = curses.color_pair(2 if status == 'DONE' or status == 'COMPLETED' else 5)
+    safe_addstr(stdscr, cy+1, cx+card_w-len(status)-6, f" {status} ", s_col | curses.A_BOLD | curses.A_REVERSE)
+    
+    # Content
+    content, inner_w = item.get('content', ''), card_w - 8
+    lines = []
+    # Split by newline first
+    raw_lines = content.split('\n')
+    for r_line in raw_lines:
+        while len(r_line) > inner_w:
+            split = r_line[:inner_w].rfind(' ')
+            if split == -1: split = inner_w
+            lines.append(r_line[:split])
+            r_line = r_line[split:].strip()
+        lines.append(r_line)
+
+    for i, line in enumerate(lines[:5]): safe_addstr(stdscr, cy+5+i, cx+4, line, main_attr)
+    
+    desc = item.get('description', '')
+    if desc:
+        safe_addstr(stdscr, cy+11, cx+2, "▀" * (card_w-4), main_attr)
+        safe_addstr(stdscr, cy+12, cx+4, "DESCRIPTION:", main_attr|curses.A_UNDERLINE)
+        d_lines = []
+        raw_d_lines = desc.split('\n')
+        for r_line in raw_d_lines:
+            while len(r_line) > inner_w:
+                split = r_line[:inner_w].rfind(' ')
+                if split == -1: split = inner_w
+                d_lines.append(r_line[:split])
+                r_line = r_line[split:].strip()
+            d_lines.append(r_line)
+            
+        for i, line in enumerate(d_lines[:8]): safe_addstr(stdscr, cy+14+i, cx+4, line, main_attr)
+
 def show_neobrutalist_popup(stdscr, tree, start_idx):
     idx = start_idx
     h, w = stdscr.getmaxyx()
@@ -1690,44 +1731,7 @@ def show_neobrutalist_popup(stdscr, tree, start_idx):
         
         # 3. Draw Card Popup
         node = tree[idx]; item = node['data']
-        card_w, card_h = min(84, int(w * 0.9)), min(26, int(h * 0.9))
-        cy, cx = (h - card_h) // 2, (w - card_w) // 2
-        p_name = item.get('project', 'General')
-        p_col_id = p_colors.get(p_name, 4)
-        
-        # Shadow & Body
-        for y in range(cy + 1, cy + card_h + 1): safe_addstr(stdscr, y, cx + 2, " " * card_w, curses.color_pair(8))
-        main_attr = curses.color_pair(p_col_id) | curses.A_REVERSE | curses.A_BOLD
-        for y in range(cy, cy + card_h): safe_addstr(stdscr, y, cx, " " * card_w, main_attr)
-            
-        # Stickers
-        st_attr = curses.color_pair(0) | curses.A_BOLD
-        safe_addstr(stdscr, cy+1, cx+2, f"  {p_name.upper()}  ", st_attr)
-        safe_addstr(stdscr, cy+2, cx+4, f" {item.get('date', 'NA')} ", st_attr)
-        status = item['status'].upper()
-        s_col = curses.color_pair(2 if status == 'DONE' else 5)
-        safe_addstr(stdscr, cy+1, cx+card_w-len(status)-6, f" {status} ", s_col | curses.A_BOLD | curses.A_REVERSE)
-        safe_addstr(stdscr, cy+2, cx+card_w-15, " REWARD: 30 XP ", st_attr)
-        
-        # Content
-        content, inner_w = item['content'], card_w - 8
-        lines = []
-        while len(content) > inner_w:
-            split = content[:inner_w].rfind(' '); split = split if split != -1 else inner_w
-            lines.append(content[:split]); content = content[split:].strip()
-        lines.append(content)
-        for i, line in enumerate(lines[:5]): safe_addstr(stdscr, cy+5+i, cx+4, line, main_attr)
-        
-        desc = item.get('description', '')
-        if desc:
-            safe_addstr(stdscr, cy+11, cx+2, "▀" * (card_w-4), main_attr)
-            safe_addstr(stdscr, cy+12, cx+4, "DESCRIPTION:", main_attr|curses.A_UNDERLINE)
-            d_lines = []
-            while len(desc) > inner_w:
-                split = desc[:inner_w].rfind(' '); split = split if split != -1 else inner_w
-                d_lines.append(desc[:split]); desc = desc[split:].strip()
-            d_lines.append(desc)
-            for i, line in enumerate(d_lines[:8]): safe_addstr(stdscr, cy+14+i, cx+4, line, main_attr)
+        draw_neobrutalist_card(stdscr, item, p_colors)
 
         stdscr.refresh()
         k = stdscr.getch()
