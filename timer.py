@@ -830,13 +830,34 @@ def show_timer_view(stdscr):
             elif k == ord(' ') and f_items:
                 item = f_items[focus_idx]
                 cfg = load_config()
+                # Use a local index for navigation within the popup context if we were to support next/prev
+                # But here we just show ONE card. To navigate, we should update the card in place.
+                
+                # We need a loop that handles navigation keys and updates 'item'
+                curr_f_idx = focus_idx
                 while True:
-                    render()
-                    draw_neobrutalist_card(stdscr, item, cfg.get('project_colors', {}))
+                    render() # Redraw background
+                    
+                    # Update item based on current index
+                    curr_item = f_items[curr_f_idx]
+                    
+                    # Draw Card (Overlay)
+                    draw_neobrutalist_card(stdscr, curr_item, cfg.get('project_colors', {}))
+                    curses.curs_set(0) # Ensure cursor is hidden
                     stdscr.refresh()
+                    
                     k2 = stdscr.getch()
                     if k2 in [ord(' '), 27]: break
+                    elif k2 == curses.KEY_UP:
+                        curr_f_idx = max(0, curr_f_idx - 1)
+                    elif k2 == curses.KEY_DOWN:
+                        curr_f_idx = min(len(f_items)-1, curr_f_idx + 1)
+                    
                     time.sleep(0.05)
+                
+                # Update outer index to match where we left off
+                focus_idx = curr_f_idx
+
             elif k in [10, 13] and f_items:
                 target = f_items[focus_idx]
                 if SESSION['active']: terminate_session()
@@ -1778,6 +1799,19 @@ def show_neobrutalist_popup(stdscr, tree, start_idx):
             tmp = idx + 1
             while tmp < len(tree) and tree[tmp]['type'] != 'item': tmp += 1
             if tmp < len(tree): idx = tmp
+        elif k in [ord('f'), ord('F')]:
+            # Toggle Focus
+            if item.get('id') != 'history':
+                todos_all = load_todos()
+                changed = False
+                for t in todos_all:
+                    if t['id'] == item['id']:
+                        t['focused'] = not t.get('focused', False)
+                        # Update local item to reflect change immediately
+                        item['focused'] = t['focused']
+                        tree[idx]['data']['focused'] = t['focused']
+                        changed = True; break
+                if changed: save_todos(todos_all)
         elif k in [10, 13, 529]:
             # Guard against history items or non-toggleable items
             if item.get('id') == 'history': return idx 
