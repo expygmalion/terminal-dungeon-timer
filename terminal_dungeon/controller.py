@@ -4,21 +4,45 @@ from datetime import datetime
 from . import storage
 from . import state
 from .logic import clean_tags, calculate_stats
+from .model import Task, Session
+
+def init_system():
+    state.TIMER.set_callback('save_session', _save_session_callback)
+
+def _save_session_callback(status, actual_duration, context):
+    s = Session(
+        project=context.project,
+        task=context.task,
+        duration_minutes=context.duration_secs // 60,
+        status=status,
+        actual_duration_seconds=actual_duration
+    )
+    history = storage.load_history()
+    history.insert(0, s)
+    history = history[:1000]
+    storage.save_history(history)
+    
+    if status == 'completed':
+        complete_matching_todo(context.project, context.task)
+
+# Delegates
+def tick_timer(): state.TIMER.tick()
+def start_new_session(p, t, d): state.TIMER.start(p, t, d)
+def terminate_session(): state.TIMER.stop()
+def pause_timer(): state.TIMER.pause()
+def resume_timer(): state.TIMER.resume()
 
 # --- Todo Actions ---
 def add_todo(content, date_str, project, tags, description=""):
     todos = storage.load_todos()
-    new_todo = {
-        "id": str(uuid.uuid4()),
-        "content": content,
-        "description": description,
-        "date": date_str,
-        "project": project if project else "General",
-        "tags": clean_tags(tags),
-        "status": "pending",
-        "focused": False,
-        "timestamp": datetime.now().isoformat()
-    }
+    new_todo = Task(
+        content=content,
+        description=description,
+        date=date_str,
+        project=project if project else "General",
+        tags=clean_tags(tags),
+        status="pending"
+    )
     todos.append(new_todo)
     storage.save_todos(todos)
 
@@ -26,8 +50,9 @@ def complete_matching_todo(project, content):
     todos = storage.load_todos()
     changed = False
     for t in todos:
-        if t.get('project') == project and t.get('content') == content and t.get('status') == 'pending':
-            t['status'] = 'done'
+        # t is Task object, supports .get or direct access
+        if t.project == project and t.content == content and t.status == 'pending':
+            t.status = 'done'
             changed = True
     if changed: storage.save_todos(todos)
 
@@ -35,64 +60,57 @@ def toggle_todo(todo_id, duration_mins=30):
     todos = storage.load_todos()
     target = None
     for t in todos:
-        if t['id'] == todo_id:
+        if t.id == todo_id:
             target = t
             break
     
     if not target: return
 
-    if target['status'] == 'pending':
-        # Switch to DONE
-        target['status'] = 'done'
+    if target.status == 'pending':
+        target.status = 'done'
         
-        # Create a history entry with ID for tracking
         sess_id = str(uuid.uuid4())
-        session = {
-            "id": sess_id,
-            "project": target.get('project', 'General'),
-            "task": target.get('content', 'Unknown'),
-            "duration_minutes": duration_mins,
-            "timestamp": datetime.now().isoformat(),
-            "status": "completed",
-            "manual_log": True
-        }
-        # Direct save to history
+        session = Session(
+            id=sess_id,
+            project=target.project,
+            task=target.content,
+            duration_minutes=duration_mins,
+            status="completed",
+            manual_log=True
+        )
         save_session_data(session)
-        target['last_session_id'] = sess_id
+        target.last_session_id = sess_id
         
     else:
-        # Switch back to PENDING
-        target['status'] = 'pending'
-        
-        # Remove the auto-added session if it exists
-        sid = target.get('last_session_id')
+        target.status = 'pending'
+        sid = target.last_session_id
         if sid:
             history = storage.load_history()
-            new_history = [h for h in history if h.get('id') != sid]
+            new_history = [h for h in history if h.id != sid]
             if len(history) != len(new_history):
                 storage.save_history(new_history)
-            # Remove the link
-            del target['last_session_id']
+            target.last_session_id = None
             
     storage.save_todos(todos)
 
 def delete_todo(todo_id):
     todos = storage.load_todos()
-    item = next((t for t in todos if t['id'] == todo_id), None)
+    item = next((t for t in todos if t.id == todo_id), None)
     if item:
+        # UNDO stack expects dict or obj? state.undo_stack just holds data
         state.UNDO_STACK.append({'type': 'todo', 'data': item})
-        todos = [t for t in todos if t['id'] != todo_id]
+        todos = [t for t in todos if t.id != todo_id]
         storage.save_todos(todos)
 
 def update_todo(todo_id, content, date_str, project, tags, description):
     todos = storage.load_todos()
     for t in todos:
-        if t['id'] == todo_id:
-            t['content'] = content
-            t['date'] = date_str
-            t['project'] = project
-            t['tags'] = clean_tags(tags)
-            t['description'] = description
+        if t.id == todo_id:
+            t.content = content
+            t.date = date_str
+            t.project = project
+            t.tags = clean_tags(tags)
+            t.description = description
             break
     storage.save_todos(todos)
 
@@ -112,9 +130,8 @@ def add_project(name, color_id=None, tags=None):
     storage.save_config(cfg)
 
 def delete_project(name):
-    if name == "General": return # Protect General
+    if name == "General": return
     
-    # 1. Remove from Config
     cfg = storage.load_config()
     if name in cfg['project_tags']:
         col = cfg.get('project_colors', {}).get(name)
@@ -124,15 +141,13 @@ def delete_project(name):
             del cfg['project_colors'][name]
         storage.save_config(cfg)
     
-    # 2. Remove from Todos
     todos = storage.load_todos()
-    new_todos = [t for t in todos if t.get('project') != name]
+    new_todos = [t for t in todos if t.project != name]
     if len(todos) != len(new_todos):
         storage.save_todos(new_todos)
 
-    # 3. Remove from History
     history = storage.load_history()
-    new_history = [h for h in history if h.get('project') != name]
+    new_history = [h for h in history if h.project != name]
     if len(history) != len(new_history):
         storage.save_history(new_history)
 
@@ -141,7 +156,7 @@ def restore_last_deleted_item():
     item = state.UNDO_STACK.pop()
     if item['type'] == 'todo':
         todos = storage.load_todos()
-        todos.append(item['data'])
+        todos.append(item['data']) # item['data'] is Task object
         storage.save_todos(todos)
     elif item['type'] == 'project':
         cfg = storage.load_config()
@@ -168,41 +183,3 @@ def delete_session(index):
         storage.save_history(history)
         return True
     return False
-
-# --- Timer Logic ---
-def tick_timer():
-    if not state.SESSION['active'] or state.SESSION['state'] != 'running': return
-    now = time.time()
-    elapsed = state.SESSION['elapsed_before_pause'] + (now - state.SESSION['start_time'])
-    remaining = state.SESSION['duration_secs'] - elapsed
-    if now - state.SESSION['last_blink'] > 0.5:
-        state.SESSION['show_colon'] = not state.SESSION['show_colon']
-        state.SESSION['last_blink'] = now
-    if remaining <= 0:
-        state.SESSION['state'] = 'finished'; state.SESSION['show_colon'] = True
-        save_session_data({"project": state.SESSION['project'], "task": state.SESSION['task'], "duration_minutes": state.SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "completed"})
-        complete_matching_todo(state.SESSION['project'], state.SESSION['task'])
-
-def start_new_session(project, task, duration_mins):
-    state.SESSION['active'] = True; state.SESSION['state'] = 'running'
-    state.SESSION['project'] = project; state.SESSION['task'] = task
-    state.SESSION['duration_secs'] = duration_mins * 60
-    state.SESSION['start_time'] = time.time(); state.SESSION['elapsed_before_pause'] = 0; state.SESSION['show_colon'] = True
-
-def terminate_session():
-    if not state.SESSION['active']: return
-    elapsed = state.SESSION['elapsed_before_pause']
-    if state.SESSION['state'] == 'running': elapsed += (time.time() - state.SESSION['start_time'])
-    if state.SESSION['state'] != 'finished':
-        save_session_data({"project": state.SESSION['project'], "task": state.SESSION['task'], "duration_minutes": state.SESSION['duration_secs'] // 60, "timestamp": datetime.now().isoformat(), "status": "terminated", "actual_duration_seconds": int(elapsed)})
-    state.SESSION['active'] = False; state.SESSION['state'] = 'stopped'
-
-def pause_timer():
-    if state.SESSION['state'] == 'running':
-        state.SESSION['state'] = 'paused'
-        state.SESSION['elapsed_before_pause'] += (time.time() - state.SESSION['start_time'])
-
-def resume_timer():
-    if state.SESSION['state'] == 'paused':
-        state.SESSION['state'] = 'running'
-        state.SESSION['start_time'] = time.time()

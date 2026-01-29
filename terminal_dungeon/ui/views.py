@@ -196,7 +196,7 @@ def show_history(stdscr):
                 target_item = display_history[idx]
                 real_idx = -1
                 for ri, rh in enumerate(history):
-                    if rh == target_item:
+                    if rh.id == target_item.id: # Use ID for matching object now
                         real_idx = ri; break
                 if real_idx != -1:
                     controller.delete_session(real_idx); history = storage.load_history()
@@ -343,35 +343,39 @@ def show_timer_view(stdscr):
             split_x = w // 2
             
             # --- LEFT SIDE: CURRENT TIMER ---
-            if state.SESSION['active']:
+            if state.TIMER.is_active:
                 cfg = storage.load_config()
-                p_color_id = cfg.get('project_colors', {}).get(state.SESSION['project'], 0)
+                p_color_id = cfg.get('project_colors', {}).get(state.TIMER.project, 0)
                 p_attr = curses.color_pair(p_color_id) if p_color_id else 0
                 
                 draw_box(stdscr, 1, 2, 6, split_x - 4, "DETAILS")
-                safe_addstr(stdscr, 2, 4, f"PROJECT: {state.SESSION['project']}", p_attr|curses.A_BOLD)
-                safe_addstr(stdscr, 3, 4, f"TASK:    {state.SESSION['task']}")
+                safe_addstr(stdscr, 2, 4, f"PROJECT: {state.TIMER.project}", p_attr|curses.A_BOLD)
+                safe_addstr(stdscr, 3, 4, f"TASK:    {state.TIMER.task}")
                 
-                elapsed = state.SESSION['elapsed_before_pause'] + (time.time()-state.SESSION['start_time'] if state.SESSION['state']=='running' else 0)
-                rem = max(0, state.SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
-                color = curses.color_pair(4) if state.SESSION['state']=='running' else curses.color_pair(6)
-                if state.SESSION['state']=='finished': color = curses.color_pair(2)
+                if state.TIMER.state_name == 'running':
+                     elapsed = state.TIMER.elapsed_before_pause + (time.time() - state.TIMER.start_time)
+                else:
+                     elapsed = state.TIMER.elapsed_before_pause
                 
-                draw_big_text(stdscr, h//2 - 4, (split_x - 30)//2, t_str if state.SESSION['show_colon'] else t_str.replace(":"," "), color)
+                rem = max(0, state.TIMER.duration_secs - elapsed); t_str = format_duration(rem)
+                color = curses.color_pair(4) if state.TIMER.state_name=='running' else curses.color_pair(6)
+                if state.TIMER.state_name=='finished': color = curses.color_pair(2)
+                
+                draw_big_text(stdscr, h//2 - 4, (split_x - 30)//2, t_str if state.TIMER.show_colon else t_str.replace(":"," "), color)
                 
                 # Progress Bar
                 bar_y = h//2 + 5; bar_w = split_x - 10
                 if bar_w > 0:
                     draw_box(stdscr, bar_y - 1, 2, 3, bar_w + 4)
-                    pct = 1.0 - (rem / state.SESSION['duration_secs']) if state.SESSION['duration_secs'] > 0 else 1.0
-                    if state.SESSION['state'] == 'finished': pct = 1.0
+                    pct = 1.0 - (rem / state.TIMER.duration_secs) if state.TIMER.duration_secs > 0 else 1.0
+                    if state.TIMER.state_name == 'finished': pct = 1.0
                     fld = int(bar_w * pct)
                     safe_addstr(stdscr, bar_y, 4, "█"*fld + "░"*(bar_w-fld), curses.color_pair(3))
                 
-                safe_addstr(stdscr, bar_y+3, 4, f"STATUS: {state.SESSION['state'].upper()}", color|curses.A_BOLD)
+                safe_addstr(stdscr, bar_y+3, 4, f"STATUS: {state.TIMER.state_name.upper()}", color|curses.A_BOLD)
 
                 # Controls
-                btns = ["MENU", "RESTART", "QUIT"] if state.SESSION['state']=='finished' else ["PAUSE" if state.SESSION['state']=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
+                btns = ["MENU", "RESTART", "QUIT"] if state.TIMER.state_name=='finished' else ["PAUSE" if state.TIMER.state_name=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
                 t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = (split_x - t_w)//2
                 for i, lbl in enumerate(btns):
                     attr = curses.color_pair(1)
@@ -395,7 +399,7 @@ def show_timer_view(stdscr):
                     safe_addstr(stdscr, 3+i, split_x + 2, f"• {item['content'][:30]}", attr)
             
             draw_pip_timer(stdscr)
-            return f_items_local, btns if state.SESSION['active'] else []
+            return f_items_local, btns if state.TIMER.is_active else []
 
         f_items, btns = render()
         
@@ -408,7 +412,7 @@ def show_timer_view(stdscr):
         if k == 9: # TAB
             active_section = 'FOCUS' if active_section == 'CONTROLS' else 'CONTROLS'
         
-        elif active_section == 'CONTROLS' and state.SESSION['active']:
+        elif active_section == 'CONTROLS' and state.TIMER.is_active:
             if k == curses.KEY_LEFT: btn = max(0, btn - 1)
             elif k == curses.KEY_RIGHT: btn = min(len(btns)-1, btn + 1)
             elif k in [10, 13]:
@@ -416,7 +420,7 @@ def show_timer_view(stdscr):
                 if sel in ["BACK", "MENU"]: return 'HISTORY'
                 elif sel == "QUIT": controller.terminate_session(); return 'QUIT'
                 elif sel == "STOP": controller.terminate_session(); return 'HISTORY'
-                elif sel == "RESTART": controller.terminate_session(); controller.start_new_session(state.SESSION['project'], state.SESSION['task'], state.SESSION['duration_secs']//60); return 'TIMER'
+                elif sel == "RESTART": controller.terminate_session(); controller.start_new_session(state.TIMER.project, state.TIMER.task, state.TIMER.duration_secs//60); return 'TIMER'
                 elif sel == "RESUME": controller.resume_timer()
                 elif sel == "PAUSE": controller.pause_timer()
         
@@ -445,7 +449,7 @@ def show_timer_view(stdscr):
 
             elif k in [10, 13] and f_items:
                 target = f_items[focus_idx]
-                if state.SESSION['active']: controller.terminate_session()
+                if state.TIMER.is_active: controller.terminate_session()
                 d = select_duration(stdscr)
                 if d:
                     controller.start_new_session(target.get('project', 'General'), target['content'], d)

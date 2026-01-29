@@ -1,15 +1,12 @@
+from .timer_system import TimerContext
+
 # --- Global State ---
-SESSION = {
-    'active': False,
-    'state': 'stopped', 
-    'project': "",
-    'task': "",
-    'duration_secs': 0,
-    'start_time': 0,
-    'elapsed_before_pause': 0,
-    'last_blink': 0,
-    'show_colon': True
-}
+# Replaces the old SESSION dict
+TIMER = TimerContext()
+
+# Legacy placeholder to prevent immediate crashes if I missed a spot, 
+# but we aim to remove it.
+# SESSION = {} 
 
 UNDO_STACK = []
 

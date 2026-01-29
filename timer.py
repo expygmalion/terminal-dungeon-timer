@@ -10,6 +10,7 @@ from terminal_dungeon import state, controller
 
 def main(stdscr):
     renderer.setup_colors()
+    controller.init_system()
     curses.curs_set(0)
     
     view = 'HISTORY'

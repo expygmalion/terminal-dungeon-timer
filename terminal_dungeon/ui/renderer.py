@@ -34,19 +34,16 @@ def draw_big_text(stdscr, y, x, text, color_pair):
     stdscr.attroff(color_pair)
 
 def format_duration(seconds):
-    # Local helper or import from logic? 
-    # To avoid circular import if logic imports this (unlikely), but let's just duplicate or import.
-    # Logic is safe to import.
     m = int(seconds // 60); s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"
 
 def draw_pip_timer(stdscr):
-    if not state.SESSION['active']: return
+    if not state.TIMER.is_active: return
     h, w = stdscr.getmaxyx()
     
-    proj = state.SESSION['project']
-    task = state.SESSION['task']
-    xp = state.SESSION['duration_secs'] // 60
+    proj = state.TIMER.project
+    task = state.TIMER.task
+    xp = state.TIMER.duration_secs // 60
     
     width = max(30, min(w-4, len(task) + 4), min(w-4, len(proj) + 15))
     height = 5
@@ -56,13 +53,13 @@ def draw_pip_timer(stdscr):
     
     if y < 0: return
 
-    if state.SESSION['state'] == 'running': elapsed = state.SESSION['elapsed_before_pause'] + (time.time() - state.SESSION['start_time'])
-    else: elapsed = state.SESSION['elapsed_before_pause']
-    rem = max(0, state.SESSION['duration_secs'] - elapsed); t_str = format_duration(rem)
+    if state.TIMER.state_name == 'running': elapsed = state.TIMER.elapsed_before_pause + (time.time() - state.TIMER.start_time)
+    else: elapsed = state.TIMER.elapsed_before_pause
+    rem = max(0, state.TIMER.duration_secs - elapsed); t_str = format_duration(rem)
     
     color = curses.color_pair(4)
-    if state.SESSION['state'] == 'paused': color = curses.color_pair(6)
-    elif state.SESSION['state'] == 'finished': color = curses.color_pair(2)
+    if state.TIMER.state_name == 'paused': color = curses.color_pair(6)
+    elif state.TIMER.state_name == 'finished': color = curses.color_pair(2)
     
     try:
         draw_box(stdscr, y, x, height, width, "ACTIVE TIMER")
@@ -72,7 +69,7 @@ def draw_pip_timer(stdscr):
         
         safe_addstr(stdscr, y+2, x+2, task[:width-4])
         
-        icon = "▶" if state.SESSION['state']=='running' else ("⏸" if state.SESSION['state']=='paused' else "✔")
+        icon = "▶" if state.TIMER.state_name=='running' else ("⏸" if state.TIMER.state_name=='paused' else "✔")
         safe_addstr(stdscr, y+3, x + (width - len(t_str) - 4)//2, f"{icon} {t_str}", color | curses.A_BOLD)
     except: pass
 
@@ -153,7 +150,7 @@ def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
 def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx):
     h, w = stdscr.getmaxyx()
     bottom_margin = 5
-    if state.SESSION['active']: bottom_margin = 11
+    if state.TIMER.is_active: bottom_margin = 11
     
     sel_idx = max(0, min(sel_idx, len(tree)-1))
     if sel_idx < scroll_idx: scroll_idx = sel_idx
