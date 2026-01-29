@@ -2,8 +2,30 @@ from datetime import datetime, timedelta
 from . import storage
 
 def get_project_tags(project_name):
+    # 1. Config Tags (Base)
     cfg = storage.load_config()
-    return cfg.get('project_tags', {}).get(project_name, [])
+    config_tags = cfg.get('project_tags', {}).get(project_name, [])
+    
+    # Map tag -> last_seen_timestamp
+    # Config tags get a low priority timestamp (e.g. empty string)
+    tag_recency = {t: "" for t in config_tags}
+    
+    # 2. Todo Tags (Usage)
+    todos = storage.load_todos()
+    for t in todos:
+        if t.get('project') == project_name:
+            ts = t.get('timestamp', "")
+            for tag in t.get('tags', []):
+                # Update if this usage is more recent
+                if tag not in tag_recency or ts > tag_recency[tag]:
+                    tag_recency[tag] = ts
+                    
+    # 3. Sort by recency descending
+    # Tags with same timestamp (e.g. config only) will be sorted by name via tuple comparison if we want deterministic
+    # But python sort is stable. Let's sort by key=timestamp desc
+    sorted_tags = sorted(tag_recency.keys(), key=lambda x: tag_recency[x], reverse=True)
+    
+    return sorted_tags
 
 def get_unique_projects():
     todos = storage.load_todos()

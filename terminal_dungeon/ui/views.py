@@ -15,7 +15,7 @@ def check_nav_keys(key):
     if key in [ord('r'), ord('R')]: return 'RAID'
     if key in [ord('i'), ord('I')]: return 'INFO'
     if key in [ord('p'), ord('P')]: return 'SETTINGS'
-    if key in [ord('t'), ord('T')]: return 'TIMER'
+    if key in [ord('T')]: return 'TIMER'
     if key in [ord('l'), ord('L')]: return 'TODO'
     return None
 
@@ -842,12 +842,23 @@ def show_todo_list(stdscr):
         scroll_idx = draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx)
         
         nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
-        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [f] Focus  [S] Start  [F] Filter  [I] Isolate  [Space] Dtls  [Enter] Toggle  [D] Del  [ESC] Back", curses.color_pair(4))
+        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [f] Focus  [T] Timer  [k] Today  [U] Undo  [S] Start  [F] Filter  [I] Isolate  [Space] Dtls  [Enter] Toggle  [D] Del  [ESC] Back", curses.color_pair(4))
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
         if k == -1: time.sleep(0.05); continue
         
+        if k in [ord('k')]:
+            if tree and 0 <= sel_idx < len(tree):
+                node = tree[sel_idx]
+                if node['type'] == 'item':
+                    controller.move_todo_to_today(node['data']['id'])
+                    # Maybe clear selection or jump? For now just refresh.
+                    delete_pending_idx = -1
+            continue
+
+        if k in [ord('T')]: return 'TIMER'
+
         nav = check_nav_keys(k)
         if nav and nav != 'TODO' and nav != 'INFO': return nav
 
@@ -876,9 +887,13 @@ def show_todo_list(stdscr):
                          curr += 1
                      
                      if child_ids:
+                         # Determine target state: if all are focused, target is Unfocus. Else, target is Focus.
+                         all_focused = all(t.get('focused', False) for t in todos_all if t['id'] in child_ids)
+                         target_state = not all_focused
+                         
                          for t in todos_all:
                              if t['id'] in child_ids:
-                                 t['focused'] = True # Set all to focused if toggling group
+                                 t['focused'] = target_state
                                  changed = True
                 
                 if changed:
@@ -972,7 +987,7 @@ def show_todo_list(stdscr):
             sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
         elif k in [curses.KEY_DOWN, ord('j')]: 
             sel_idx += 1; delete_pending_idx = -1
-        elif k in [curses.KEY_UP, ord('k')]: 
+        elif k in [curses.KEY_UP, ord('K')]: 
             sel_idx -= 1; delete_pending_idx = -1
         elif k in [10, 13, 529]: # Enter (13) or Ctrl+Enter (10/529)
             if tree:
@@ -1002,6 +1017,16 @@ def show_todo_list(stdscr):
                         # Toggling back to pending (no time needed)
                         controller.toggle_todo(item['id'])
             delete_pending_idx = -1
+        elif k in [ord('d'), ord('D')]:
+            if tree and 0 <= sel_idx < len(tree):
+                node = tree[sel_idx]
+                if node['type'] == 'item':
+                    controller.delete_todo(node['data']['id'])
+                    delete_pending_idx = sel_idx
+                elif node['type'] == 'project':
+                    # Optional: Prompt to confirm project deletion?
+                    # For now, just delete as we have undo
+                    controller.delete_project(node['key'])
         elif k in [ord('n'), ord('N')]:
             new_p = add_new_todo_dialog(stdscr); delete_pending_idx = -1
             if new_p:

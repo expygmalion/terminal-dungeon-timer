@@ -81,8 +81,7 @@ def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
     p_name = item.get('project', 'General')
     p_col_id = p_colors.get(p_name, 4)
     
-    # Shadow & Body
-    for y in range(cy + 1, cy + card_h + 1): safe_addstr(stdscr, y, cx + 2, " " * card_w, curses.color_pair(8))
+    # Body
     main_attr = curses.color_pair(p_col_id) | curses.A_REVERSE | curses.A_BOLD
     for y in range(cy, cy + card_h): safe_addstr(stdscr, y, cx, " " * card_w, main_attr)
         

@@ -38,31 +38,110 @@ def text_input(stdscr, y, x, prompt, prefill=""):
         elif 32 <= k <= 126: query += chr(k)
     stdscr.nodelay(False)
 
-def card_text_input(stdscr, y, x, prompt, attr, prefill=""):
+def card_text_input(stdscr, y, x, prompt, attr, prefill="", max_width=None, multiline=False):
     query = prefill
+    cursor_idx = len(query)
+    if max_width is None:
+        _, w = stdscr.getmaxyx()
+        max_width = w - x - 2
+
     stdscr.nodelay(True)
     while True:
-        # Render prompt + current query
-        safe_addstr(stdscr, y, x, " " * (len(prompt) + 40))
-        safe_addstr(stdscr, y, x, f"{prompt} {query}", attr)
-        safe_addstr(stdscr, y, x + len(prompt) + 1 + len(query), "_", attr | curses.A_BLINK)
+        # 1. Layout & Wrapping Logic
+        p_prefix = f"{prompt} "
+        avail_w = max_width - len(p_prefix) - 1
+        if avail_w < 10: avail_w = 10
+        
+        marker = "\u0000"
+        temp_query = query[:cursor_idx] + marker + query[cursor_idx:]
+        manual_parts = temp_query.split('\n')
+        
+        display_lines = []
+        cursor_y_off = 0
+        cursor_x_off = 0
+        
+        for part in manual_parts:
+            if not part:
+                if marker in part:
+                    cursor_y_off = len(display_lines)
+                    cursor_x_off = 0
+                display_lines.append("")
+                continue
+            
+            # Wrap by characters
+            for j in range(0, len(part), avail_w):
+                chunk = part[j:j+avail_w]
+                if marker in chunk:
+                    cursor_y_off = len(display_lines)
+                    cursor_x_off = chunk.find(marker)
+                    chunk = chunk.replace(marker, "")
+                display_lines.append(chunk)
+
+        # 2. Rendering
+        num_rows = 15 if multiline else 1
+        for i in range(num_rows):
+            safe_addstr(stdscr, y + i, x, " " * max_width)
+            
+        for i, line in enumerate(display_lines[:num_rows]):
+            prefix = p_prefix if i == 0 else " " * len(p_prefix)
+            safe_addstr(stdscr, y + i, x, prefix, attr)
+            safe_addstr(stdscr, y + i, x + len(prefix), line, attr)
+
+        # Cursor
+        if cursor_y_off < num_rows:
+            safe_addstr(stdscr, y + cursor_y_off, x + len(p_prefix) + cursor_x_off, "_", attr | curses.A_BLINK)
+        
         stdscr.refresh()
         
         k = stdscr.getch()
         if k == -1: time.sleep(0.02); continue
         
-        if k == 542: return (query, "BACK")
-        if k == 543: return (query, "NEXT")
-        if k == 9: return (query, "NEXT") # TAB
+        # Navigation (Universal)
+        if k in [9, 13, curses.KEY_ENTER]: return (query, "NEXT") # Tab or Enter
+        if k == 353: return (query, "BACK") # Shift+Tab
+        
+        # Shift+Enter / Newline logic (LF = 10)
+        if k == 10 or k == 337 or k == 525:
+            if multiline:
+                query = query[:cursor_idx] + "\n" + query[cursor_idx:]
+                cursor_idx += 1
+                continue
+            else: return (query, "NEXT")
+            
         if k == 27:
             k2 = stdscr.getch()
             if k2 == curses.KEY_LEFT: return (query, "BACK")
             if k2 == curses.KEY_RIGHT: return (query, "NEXT")
+            if k2 in [10, 13]: # Alt+Enter
+                if multiline:
+                    query = query[:cursor_idx] + "\n" + query[cursor_idx:]
+                    cursor_idx += 1; continue
             if k2 == -1: return (None, "CANCEL")
             
-        if k in [10, 13]: return (query, "NEXT")
-        elif k in [127, 8, curses.KEY_BACKSPACE]: query = query[:-1]
-        elif 32 <= k <= 126: query += chr(k)
+        # Editing
+        elif k in [127, 8, curses.KEY_BACKSPACE]:
+            if cursor_idx > 0:
+                query = query[:cursor_idx-1] + query[cursor_idx:]
+                cursor_idx -= 1
+        elif k == curses.KEY_DC:
+            if cursor_idx < len(query):
+                query = query[:cursor_idx] + query[cursor_idx+1:]
+        
+        # Arrows (Visual movement)
+        elif k == curses.KEY_LEFT:
+            if cursor_idx > 0: cursor_idx -= 1
+        elif k == curses.KEY_RIGHT:
+            if cursor_idx < len(query): cursor_idx += 1
+        elif k == curses.KEY_UP:
+            # Move cursor back by one visual line length
+            cursor_idx = max(0, cursor_idx - avail_w)
+        elif k == curses.KEY_DOWN:
+            cursor_idx = min(len(query), cursor_idx + avail_w)
+            
+        elif 32 <= k <= 126:
+            query = query[:cursor_idx] + chr(k) + query[cursor_idx:]
+            cursor_idx += 1
+            
     stdscr.nodelay(False)
 
 def select_duration(stdscr):
@@ -159,6 +238,8 @@ def fuzzy_select(stdscr, y, x, title, options, p_colors=None, header_list=None):
         k = stdscr.getch()
         if k == -1: time.sleep(0.02); continue
         
+        if k == 9: return (matches[sel_idx] if matches else None, "NEXT")   # TAB
+        if k == 353: return (None, "BACK") # Shift+Tab
         if k == 542: return (None, "BACK") # Alt+Left
         if k == 543: return (None, "NEXT") # Alt+Right
         if k == 27:
@@ -234,10 +315,13 @@ def add_new_todo_dialog(stdscr):
 
     def draw_base_card(color_id, title):
         stdscr.erase(); draw_pip_timer(stdscr)
-        for y in range(cy + 1, cy + card_h + 1): safe_addstr(stdscr, y, cx + 2, " " * card_w, curses.color_pair(8))
         attr = curses.color_pair(color_id) | curses.A_REVERSE | curses.A_BOLD
         for y in range(cy, cy + card_h): safe_addstr(stdscr, y, cx, " " * card_w, attr)
         safe_addstr(stdscr, cy+1, cx+2, f"  {title}  ", curses.color_pair(0)|curses.A_BOLD)
+        
+        # Navigation Bar
+        nav_msg = "[Tab/Ent] Next  [S-Tab] Back  [Esc] Cancel  [S-Ent] NewLine"
+        safe_addstr(stdscr, h-2, (w - len(nav_msg)) // 2, nav_msg, curses.color_pair(4) | curses.A_BOLD)
         return attr
 
     while 0 <= cur_step < len(steps):
@@ -336,7 +420,7 @@ def add_new_todo_dialog(stdscr):
 
         elif step == 'NAME':
             main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
-            res, action = card_text_input(stdscr, cy+5, cx+4, "TASK NAME:", main_attr, prefill=state['content'])
+            res, action = card_text_input(stdscr, cy+5, cx+4, "TASK NAME:", main_attr, prefill=state['content'], max_width=card_w-8)
             if action == "CANCEL": return None
             state['content'] = res or ""
             cur_step += (1 if action == "NEXT" else -1)
@@ -344,7 +428,7 @@ def add_new_todo_dialog(stdscr):
         elif step == 'DESCRIPTION':
             main_attr = draw_base_card(state['color_id'], f"PROJECT: {state['project'].upper()}")
             safe_addstr(stdscr, cy+5, cx+4, f"NAME: {state['content']}", main_attr)
-            res, action = card_text_input(stdscr, cy+7, cx+4, "DESCRIPTION:", main_attr, prefill=state['description'])
+            res, action = card_text_input(stdscr, cy+7, cx+4, "DESCRIPTION:", main_attr, prefill=state['description'], max_width=card_w-8, multiline=True)
             if action == "CANCEL": return None
             state['description'] = res or ""
             cur_step += (1 if action == "NEXT" else -1)
@@ -375,16 +459,31 @@ def add_new_todo_dialog(stdscr):
             safe_addstr(stdscr, cy+6, cx+4, f"NAME:    {state['content']}", main_attr)
             safe_addstr(stdscr, cy+8, cx+4, f"DATE:    {state['date']}", main_attr)
             safe_addstr(stdscr, cy+10, cx+4, f"TAGS:    {' '.join(['#'+t for t in state['tags']])}", main_attr)
-            msg = " [ENTER] TO SAVE  [ALT+LEFT] TO GO BACK  [ESC] DISCARD "
-            safe_addstr(stdscr, cy+card_h-3, cx+(card_w-len(msg))//2, msg, curses.color_pair(0)|curses.A_BOLD)
+            
+            # Use unified nav bar hint
+            nav_msg = "[S-Tab] Back  [Enter] Save  [Esc] Discard"
+            safe_addstr(stdscr, h-2, (w - len(nav_msg)) // 2, nav_msg, curses.color_pair(4) | curses.A_BOLD)
+            
             stdscr.refresh()
+            stdscr.nodelay(True)
             while True:
                 k = stdscr.getch()
-                if k in [10, 13]:
+                if k == -1: time.sleep(0.02); continue
+                
+                if k in [10, 13, 9]: # Enter or Tab to confirm
                     add_todo(state['content'], state['date'], state['project'], state['tags'], state['description'])
                     return state['project']
-                elif k == 27: return None
-                elif k == 542: cur_step -= 1; break
+                
+                if k in [353, 542]: # Shift+Tab or Alt+Left
+                    cur_step -= 1; break
+                    
+                if k == 27:
+                    # Check for Alt sequence
+                    k2 = stdscr.getch()
+                    if k2 == curses.KEY_LEFT or k2 == 542:
+                        cur_step -= 1; break
+                    if k2 == -1: return None # True ESC
+            stdscr.nodelay(False)
     return None
 
 def edit_todo_dialog(stdscr, item):

@@ -45,6 +45,7 @@ def add_todo(content, date_str, project, tags, description=""):
     )
     todos.append(new_todo)
     storage.save_todos(todos)
+    state.UNDO_STACK.append({'type': 'add', 'id': new_todo.id})
 
 def complete_matching_todo(project, content):
     todos = storage.load_todos()
@@ -56,7 +57,7 @@ def complete_matching_todo(project, content):
             changed = True
     if changed: storage.save_todos(todos)
 
-def toggle_todo(todo_id, duration_mins=30):
+def toggle_todo(todo_id, duration_mins=30, record_undo=True):
     todos = storage.load_todos()
     target = None
     for t in todos:
@@ -65,6 +66,9 @@ def toggle_todo(todo_id, duration_mins=30):
             break
     
     if not target: return
+
+    if record_undo:
+        state.UNDO_STACK.append({'type': 'toggle', 'id': todo_id})
 
     if target.status == 'pending':
         target.status = 'done'
@@ -114,6 +118,15 @@ def update_todo(todo_id, content, date_str, project, tags, description):
             break
     storage.save_todos(todos)
 
+def move_todo_to_today(todo_id):
+    todos = storage.load_todos()
+    today = datetime.now().strftime("%Y-%m-%d")
+    for t in todos:
+        if t.id == todo_id:
+            t.date = today
+            break
+    storage.save_todos(todos)
+
 # --- Project Actions ---
 def add_project(name, color_id=None, tags=None):
     if not name: return
@@ -153,20 +166,33 @@ def delete_project(name):
 
 def restore_last_deleted_item():
     if not state.UNDO_STACK: return False
-    item = state.UNDO_STACK.pop()
-    if item['type'] == 'todo':
+    action = state.UNDO_STACK.pop()
+    
+    if action['type'] == 'todo':
         todos = storage.load_todos()
-        todos.append(item['data']) # item['data'] is Task object
+        todos.append(action['data']) # item['data'] is Task object
         storage.save_todos(todos)
-    elif item['type'] == 'project':
+        
+    elif action['type'] == 'project':
         cfg = storage.load_config()
-        p_name = item['data']['name']
-        p_tags = item['data']['tags']
+        p_name = action['data']['name']
+        p_tags = action['data']['tags']
         cfg['project_tags'][p_name] = p_tags
-        if item['data'].get('color'):
+        if action['data'].get('color'):
              if 'project_colors' not in cfg: cfg['project_colors'] = {}
-             cfg['project_colors'][p_name] = item['data']['color']
+             cfg['project_colors'][p_name] = action['data']['color']
         storage.save_config(cfg)
+        
+    elif action['type'] == 'add':
+        # Undo add = delete
+        todos = storage.load_todos()
+        todos = [t for t in todos if t.id != action['id']]
+        storage.save_todos(todos)
+        
+    elif action['type'] == 'toggle':
+        # Undo toggle = toggle back (no new undo record)
+        toggle_todo(action['id'], record_undo=False)
+        
     return True
 
 # --- History/Session Actions ---
