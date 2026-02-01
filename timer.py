@@ -26,7 +26,7 @@ def main(stdscr):
         elif view == 'TODO': view = views.show_todo_list(stdscr)
         elif view == 'NEW': view = views.show_quick_start_dialog(stdscr)
         elif view == 'QUIT':
-            if state.SESSION['active']: controller.terminate_session()
+            if state.TIMER.is_active: controller.terminate_session()
             break
 
 if __name__ == "__main__":

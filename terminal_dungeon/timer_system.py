@@ -4,7 +4,7 @@ from .model import Session
 
 class TimerState(ABC):
     @abstractmethod
-    def start(self, context, project, task, duration_mins): pass
+    def start(self, context, project, task, duration_mins, priority=1): pass
     
     @abstractmethod
     def pause(self, context): pass
@@ -19,9 +19,10 @@ class TimerState(ABC):
     def tick(self, context): pass
 
 class StoppedState(TimerState):
-    def start(self, context, project, task, duration_mins):
+    def start(self, context, project, task, duration_mins, priority=1):
         context.project = project
         context.task = task
+        context.priority = priority
         context.duration_secs = duration_mins * 60
         context.start_time = time.time()
         context.elapsed_before_pause = 0
@@ -33,7 +34,7 @@ class StoppedState(TimerState):
     def tick(self, context): pass
 
 class RunningState(TimerState):
-    def start(self, context, project, task, duration_mins): pass
+    def start(self, context, project, task, duration_mins, priority=1): pass
     
     def pause(self, context):
         context.elapsed_before_pause += (time.time() - context.start_time)
@@ -60,7 +61,7 @@ class RunningState(TimerState):
             context.transition_to(FinishedState())
 
 class PausedState(TimerState):
-    def start(self, context, project, task, duration_mins): pass
+    def start(self, context, project, task, duration_mins, priority=1): pass
     
     def pause(self, context): pass
     
@@ -76,10 +77,10 @@ class PausedState(TimerState):
     def tick(self, context): pass
 
 class FinishedState(TimerState):
-    def start(self, context, project, task, duration_mins):
+    def start(self, context, project, task, duration_mins, priority=1):
         # Restart
         context.transition_to(StoppedState())
-        context.start(project, task, duration_mins)
+        context.start(project, task, duration_mins, priority)
         
     def pause(self, context): pass
     def resume(self, context): pass
@@ -94,21 +95,22 @@ class TimerContext:
         self.state = StoppedState()
         self.project = ""
         self.task = ""
+        self.priority = 1
         self.duration_secs = 0
         self.start_time = 0
         self.elapsed_before_pause = 0
-        self.last_blink = 0
         self.show_colon = True
-        self.callbacks = {} # save_session
-    
-    def set_callback(self, name, func):
-        self.callbacks[name] = func
+        self.last_blink = 0
+        self.callbacks = {}
 
     def transition_to(self, state):
         self.state = state
-        
-    def start(self, project, task, duration_mins):
-        self.state.start(self, project, task, duration_mins)
+
+    def set_callback(self, name, func):
+        self.callbacks[name] = func
+
+    def start(self, project, task, duration_mins, priority=1):
+        self.state.start(self, project, task, duration_mins, priority)
         
     def pause(self):
         self.state.pause(self)

@@ -7,7 +7,7 @@ import textwrap
 from .. import storage, state, controller
 from ..logic import calculate_stats, determine_class, get_unique_projects, get_unique_tasks, format_duration
 from .renderer import safe_addstr, draw_box, draw_big_text, draw_pip_timer, draw_neobrutalist_card, draw_todo_tree
-from .inputs import select_duration, select_color, fuzzy_select, text_input, add_new_todo_dialog, edit_todo_dialog, tag_filtering_dialog, select_date_dialog
+from .inputs import select_duration, select_color, fuzzy_select, text_input, add_new_todo_dialog, edit_todo_dialog, tag_filtering_dialog, select_date_dialog, quick_add_todo_dialog
 
 def check_nav_keys(key):
     if key in [ord('h'), ord('H')]: return 'HEATMAP'
@@ -124,7 +124,12 @@ def show_history(stdscr):
                 header = f"{ 'TIME':<6} | {'PROJECT':<12} | {'TASK':<25} | {'DUR':<5} | {'STATUS':<10} | {'MULT'}"
             safe_addstr(stdscr, 2, 2, header, curses.color_pair(3)); safe_addstr(stdscr, 3, 2, "-"*min(len(header), w-2), curses.color_pair(3))
             
-            list_h_local = max(1, h - 6)
+            # Footer Help
+            nav_help = "[TAB] View  [[] Day -  []] Day +  [Space] Dtls  [N] New  [L] Todo  [D] Del  [H] Heat  [W] Week  [R] Raid  [P] Pref  [Q] Quit"
+            help_lines = textwrap.wrap(nav_help, w - 4)
+            footer_h = len(help_lines)
+            
+            list_h_local = max(1, h - 6 - footer_h)
             
             # Table Content
             if not display_history_local:
@@ -134,7 +139,8 @@ def show_history(stdscr):
                 for i in range(list_h_local):
                     ii = draw_scroll + i
                     if ii >= len(display_history_local): break
-                    it = display_history_local[ii]; st = "SUCCESS" if it.get('status')=='completed' else "TERM"
+                    it = display_history_local[ii]
+                    st = "SUCCESS" if it.get('status')=='completed' else "TERM"
                     dm = f"{it.get('duration_minutes',0)}m" if st=="SUCCESS" else f"{int(it.get('actual_duration_seconds',0)//60)}m"
                     
                     ts = it.get('timestamp', '')
@@ -148,12 +154,14 @@ def show_history(stdscr):
                     # Selection vs Row attribute
                     attr = curses.color_pair(0) | curses.A_REVERSE if ii == draw_idx else (curses.color_pair(p_color_id) if p_color_id else 0)
                     
-                    row_str = f"{tm_str:<6} | {p_name[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {'1.0x' if st.endswith('SUCCESS') else '-'}"
+                    mult = it.get('xp_multiplier', 1.0)
+                    mult_str = f"{mult:.1f}x"
+                    
+                    row_str = f"{tm_str:<6} | {p_name[:12]:<12} | {it.get('task','-')[:25]:<25} | {dm:<5} | {st[:10]:<10} | {mult_str}"
                     safe_addstr(stdscr, 4+i, 2, row_str, attr)
             
-            # Footer Help
-            nav_help = "[TAB] View  [[] Day -  []] Day +  [Space] Dtls  [N] New  [L] Todo  [D] Del"
-            safe_addstr(stdscr, h-1, 2, f"{nav_help}  [H] Heat  [W] Week  [R] Raid  [P] Pref  [Q] Quit", curses.color_pair(4))
+            for i, line in enumerate(help_lines):
+                safe_addstr(stdscr, h - footer_h + i, 2, line, curses.color_pair(4) | curses.A_DIM)
             
             draw_pip_timer(stdscr)
             return display_history_local, list_h_local
@@ -327,16 +335,18 @@ def show_settings(stdscr):
         elif k == 27: return 'HISTORY'
 
 def show_timer_view(stdscr):
+    h, w = stdscr.getmaxyx()
     btn = 0
     focus_idx = 0
+    focus_scroll = 0
     active_section = 'CONTROLS' # 'CONTROLS' or 'FOCUS'
     
     while True:
-        def render():
-            controller.tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx()
+        h, w = stdscr.getmaxyx()
+        def render(f_idx, f_scr):
+            controller.tick_timer(); stdscr.erase()
             
-            # Draw Focus List
-            focus_list = state.TODO_STATE.get('focus_queue', [])
+            # Get data
             todos = storage.load_todos()
             f_items_local = [t for t in todos if t.get('focused', False)]
             
@@ -345,11 +355,13 @@ def show_timer_view(stdscr):
             # --- LEFT SIDE: CURRENT TIMER ---
             if state.TIMER.is_active:
                 cfg = storage.load_config()
-                p_color_id = cfg.get('project_colors', {}).get(state.TIMER.project, 0)
+                p_name = state.TIMER.project
+                p_color_id = cfg.get('project_colors', {}).get(p_name, 0)
                 p_attr = curses.color_pair(p_color_id) if p_color_id else 0
                 
+                # Header Details
                 draw_box(stdscr, 1, 2, 6, split_x - 4, "DETAILS")
-                safe_addstr(stdscr, 2, 4, f"PROJECT: {state.TIMER.project}", p_attr|curses.A_BOLD)
+                safe_addstr(stdscr, 2, 4, f"PROJECT: {p_name}", p_attr|curses.A_BOLD)
                 safe_addstr(stdscr, 3, 4, f"TASK:    {state.TIMER.task}")
                 
                 if state.TIMER.state_name == 'running':
@@ -361,10 +373,11 @@ def show_timer_view(stdscr):
                 color = curses.color_pair(4) if state.TIMER.state_name=='running' else curses.color_pair(6)
                 if state.TIMER.state_name=='finished': color = curses.color_pair(2)
                 
-                draw_big_text(stdscr, h//2 - 4, (split_x - 30)//2, t_str if state.TIMER.show_colon else t_str.replace(":"," "), color)
+                # Big Timer Text
+                draw_big_text(stdscr, h//2 - 6, (split_x - 30)//2, t_str if state.TIMER.show_colon else t_str.replace(":"," "), color)
                 
                 # Progress Bar
-                bar_y = h//2 + 5; bar_w = split_x - 10
+                bar_y = h//2 + 3; bar_w = split_x - 10
                 if bar_w > 0:
                     draw_box(stdscr, bar_y - 1, 2, 3, bar_w + 4)
                     pct = 1.0 - (rem / state.TIMER.duration_secs) if state.TIMER.duration_secs > 0 else 1.0
@@ -376,32 +389,48 @@ def show_timer_view(stdscr):
 
                 # Controls
                 btns = ["MENU", "RESTART", "QUIT"] if state.TIMER.state_name=='finished' else ["PAUSE" if state.TIMER.state_name=='running' else "RESUME", "STOP", "RESTART", "BACK", "QUIT"]
-                t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; x = (split_x - t_w)//2
+                t_w = sum(len(b)+4 for b in btns) + (len(btns)-1)*2; ctrl_x = (split_x - t_w)//2
                 for i, lbl in enumerate(btns):
                     attr = curses.color_pair(1)
                     if active_section == 'CONTROLS' and i == btn: attr |= curses.A_REVERSE
-                    safe_addstr(stdscr, h-10, x, f"[ {lbl} ]", attr); x += len(lbl)+6
+                    safe_addstr(stdscr, h-8, ctrl_x, f"[ {lbl} ]", attr); ctrl_x += len(lbl)+6
             else:
                  safe_addstr(stdscr, 5, 5, "NO ACTIVE TIMER", curses.A_DIM)
                  safe_addstr(stdscr, 7, 5, "Select a task from the list to start.", curses.A_BOLD)
+                 btns = []
 
             # --- RIGHT SIDE: FOCUS LIST ---
-            draw_box(stdscr, 1, split_x, h-8, w - split_x - 1, "QUICK START LIST")
+            list_h = h - 10
+            draw_box(stdscr, 1, split_x, list_h + 2, w - split_x - 1, "QUICK START LIST")
             if not f_items_local:
                 safe_addstr(stdscr, 3, split_x + 2, "No focused tasks.", curses.A_DIM)
                 safe_addstr(stdscr, 4, split_x + 2, "Press 'f' in Todo List to add.", curses.A_DIM)
             else:
-                list_h = h - 12
-                # Scroll logic if needed? For now simple list
-                for i, item in enumerate(f_items_local[:list_h]):
-                    attr = 0
-                    if active_section == 'FOCUS' and i == focus_idx: attr |= curses.A_REVERSE
-                    safe_addstr(stdscr, 3+i, split_x + 2, f"• {item['content'][:30]}", attr)
+                for i in range(list_h):
+                    ii = f_scr + i
+                    if ii >= len(f_items_local): break
+                    item = f_items_local[ii]
+                    
+                    is_sel = (active_section == 'FOCUS' and ii == f_idx)
+                    attr = curses.A_REVERSE if is_sel else 0
+                    
+                    # Project-based color if not selected
+                    if not is_sel:
+                        p_col = storage.load_config().get('project_colors', {}).get(item.get('project'), 0)
+                        if p_col: attr |= curses.color_pair(p_col)
+                    
+                    prefix = " > " if is_sel else " • "
+                    safe_addstr(stdscr, 3+i, split_x + 2, f"{prefix}{item['content'][:w-split_x-8]}", attr)
             
-            draw_pip_timer(stdscr)
-            return f_items_local, btns if state.TIMER.is_active else []
+            # Help Footer
+            help_str = "[TAB] Switch Section  [Arrows] Navigate  [ENTER] Select  [SPACE] Details  [ESC] Back"
+            help_lines = textwrap.wrap(help_str, w - 4)
+            for i, line in enumerate(help_lines):
+                safe_addstr(stdscr, h - len(help_lines) + i, 2, line, curses.A_DIM)
+                
+            return f_items_local, btns
 
-        f_items, btns = render()
+        f_items, btns = render(focus_idx, focus_scroll)
         
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1: time.sleep(0.05); continue
@@ -420,39 +449,33 @@ def show_timer_view(stdscr):
                 if sel in ["BACK", "MENU"]: return 'HISTORY'
                 elif sel == "QUIT": controller.terminate_session(); return 'QUIT'
                 elif sel == "STOP": controller.terminate_session(); return 'HISTORY'
-                elif sel == "RESTART": controller.terminate_session(); controller.start_new_session(state.TIMER.project, state.TIMER.task, state.TIMER.duration_secs//60); return 'TIMER'
+                elif sel == "RESTART": 
+                    p, t, d, prio = state.TIMER.project, state.TIMER.task, state.TIMER.duration_secs//60, state.TIMER.priority
+                    controller.terminate_session(); controller.start_new_session(p, t, d, prio); return 'TIMER'
                 elif sel == "RESUME": controller.resume_timer()
                 elif sel == "PAUSE": controller.pause_timer()
         
         elif active_section == 'FOCUS':
-            if k == curses.KEY_UP: focus_idx = max(0, focus_idx - 1)
-            elif k == curses.KEY_DOWN: focus_idx = min(len(f_items)-1, focus_idx + 1)
+            if k == curses.KEY_UP:
+                focus_idx = max(0, focus_idx - 1)
+                if focus_idx < focus_scroll: focus_scroll = focus_idx
+            elif k == curses.KEY_DOWN:
+                focus_idx = min(len(f_items)-1, focus_idx + 1)
+                list_h = h - 10
+                if focus_idx >= focus_scroll + list_h: focus_scroll = focus_idx - list_h + 1
             elif k == ord(' ') and f_items:
+                # Detail Card logic
                 item = f_items[focus_idx]
-                cfg = storage.load_config()
-                # We need a loop that handles navigation keys and updates 'item'
-                curr_f_idx = focus_idx
-                while True:
-                    render() # Redraw background
-                    curr_item = f_items[curr_f_idx]
-                    draw_neobrutalist_card(stdscr, curr_item, cfg.get('project_colors', {}))
-                    curses.curs_set(0) # Ensure cursor is hidden
-                    stdscr.refresh()
-                    k2 = stdscr.getch()
-                    if k2 in [ord(' '), 27]: break
-                    elif k2 == curses.KEY_UP:
-                        curr_f_idx = max(0, curr_f_idx - 1)
-                    elif k2 == curses.KEY_DOWN:
-                        curr_f_idx = min(len(f_items)-1, curr_f_idx + 1)
-                    time.sleep(0.05)
-                focus_idx = curr_f_idx
+                draw_neobrutalist_card(stdscr, item, storage.load_config().get('project_colors', {}))
+                stdscr.refresh()
+                while stdscr.getch() == -1: time.sleep(0.05)
 
             elif k in [10, 13] and f_items:
                 target = f_items[focus_idx]
                 if state.TIMER.is_active: controller.terminate_session()
                 d = select_duration(stdscr)
                 if d:
-                    controller.start_new_session(target.get('project', 'General'), target['content'], d)
+                    controller.start_new_session(target.get('project', 'General'), target['content'], d, target.get('priority', 1))
                     active_section = 'CONTROLS' 
 
         if k == 27: return 'HISTORY'
@@ -492,7 +515,9 @@ def show_yearly_heatmap(stdscr):
                 if curses.can_change_color(): attr = curses.color_pair(20) if val==0 else (curses.color_pair(21) if val<=15 else (curses.color_pair(22) if val<=30 else (curses.color_pair(23) if val<=60 else curses.color_pair(24))))
                 else: attr = (curses.color_pair(1)|curses.A_DIM) if val==0 else ((curses.color_pair(21)|curses.A_DIM) if val<=15 else (curses.color_pair(22) if val<=30 else ((curses.color_pair(23)|curses.A_BOLD) if val<=60 else (curses.color_pair(24)|curses.A_BOLD))))
                 safe_addstr(stdscr, dy+3, 4+(wk*2), "■ ", attr)
-        safe_addstr(stdscr, h-1, 2, "[L] Todo  PRESS [ESC] BACK", curses.color_pair(1))
+        help_lines = textwrap.wrap("[L] Todo  [ESC] Back", w - 4)
+        for i, line in enumerate(help_lines):
+            safe_addstr(stdscr, h - len(help_lines) + i, 2, line, curses.color_pair(1) | curses.A_DIM)
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k in [27, ord('q'), ord('Q')]: return 'HISTORY'
         nav = check_nav_keys(k); 
@@ -507,10 +532,13 @@ def show_weekly_dungeon(stdscr):
     for i in history:
         try:
             ts = datetime.fromisoformat(i['timestamp']); dt = ts.date()
-            dur = i['duration_minutes'] if i.get('status')=='completed' else (i.get('actual_duration_seconds',0)/60)
+            base_dur = i['duration_minutes'] if i.get('status')=='completed' else (i.get('actual_duration_seconds',0)/60)
+            mult = i.get('xp_multiplier', 1.0)
+            xp_earned = base_dur * mult
+            
             if curr_wk <= dt < curr_wk + timedelta(days=7):
-                daily_xp[dt.weekday()] += dur; wk_total += dur
-                p = i.get('project', 'Unknown'); proj_xp[p] = proj_xp.get(p, 0) + dur
+                daily_xp[dt.weekday()] += xp_earned; wk_total += xp_earned
+                p = i.get('project', 'Unknown'); proj_xp[p] = proj_xp.get(p, 0) + xp_earned
         except: pass
     streak = 0; check = today
     while True:
@@ -557,7 +585,9 @@ def show_weekly_dungeon(stdscr):
         safe_addstr(stdscr, ft_y+1, w//2, "QUEST LOG:", curses.A_UNDERLINE)
         for idx, q in enumerate(history[:3]):
             if ft_y + 2 + idx < h - 1: safe_addstr(stdscr, ft_y+2+idx, w//2, f"[✔] {q.get('task','-')[:20]} (+{q.get('duration_minutes',0)} XP)")
-        safe_addstr(stdscr, h-1, 2, "[L] Todo  [ESC] Return", curses.color_pair(9))
+        help_lines = textwrap.wrap("[L] Todo  [ESC] Return", w - 4)
+        for i, line in enumerate(help_lines):
+            safe_addstr(stdscr, h - len(help_lines) + i, 2, line, curses.color_pair(9) | curses.A_DIM)
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1:
             if frame < graph_h: frame += 1; time.sleep(0.02)
@@ -619,7 +649,9 @@ def show_daily_raid(stdscr):
             if mds:
                 safe_addstr(stdscr, sy+8, x, "ACTIVE BUFFS:", curses.color_pair(12)|curses.A_UNDERLINE)
                 for mi, m in enumerate(mds): safe_addstr(stdscr, sy+9+mi, x, f"⚡ {m}", curses.color_pair(11)|curses.A_BOLD)
-        safe_addstr(stdscr, h-1, 2, "[L] Todo  [Arrows] Select  [ESC] Retreat", curses.color_pair(1)|curses.A_BOLD)
+        help_lines = textwrap.wrap("[L] Todo  [Arrows] Select  [ESC] Retreat", w - 4)
+        for i, line in enumerate(help_lines):
+            safe_addstr(stdscr, h - len(help_lines) + i, 2, line, curses.color_pair(1) | curses.A_DIM)
         stdscr.refresh(); stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         if k == -1: time.sleep(0.05); continue
         if k in [27, ord('q'), ord('Q')]: return 'HISTORY'
@@ -650,7 +682,7 @@ def show_info_screen(stdscr):
                 col = 3 if i%2==0 else 25
                 row = y+1+(i//2)
                 safe_addstr(stdscr, row, x+col, f"{k} {desc}", curses.color_pair(1))
-        safe_addstr(stdscr, h-3, w//2 - 10, "Press any key to return", curses.color_pair(9)|curses.A_BOLD)
+        safe_addstr(stdscr, h-3, w//2 - 10, "Press any key to return", curses.color_pair(9) | curses.A_DIM)
         stdscr.refresh(); stdscr.timeout(50); k = stdscr.getch()
         if k == -1: continue
         nav = check_nav_keys(k); 
@@ -664,6 +696,7 @@ def show_todo_list(stdscr):
     isolation_filter = state.TODO_STATE['isolation_filter']
     isolation_type = state.TODO_STATE['isolation_type']
     active_filter = state.TODO_STATE['active_filter']
+    week_offset = state.TODO_STATE.get('week_offset', 0)
     
     sel_idx = 0
     scroll_idx = 0
@@ -673,10 +706,13 @@ def show_todo_list(stdscr):
     while True:
         controller.tick_timer(); stdscr.erase(); h, w = stdscr.getmaxyx(); draw_pip_timer(stdscr)
         # Dynamic expansion set based on mode
-        expanded = state.TODO_STATE['expanded_daily'] if mode == 'DAILY' else state.TODO_STATE['expanded_project']
+        if mode == 'DAILY': expanded = state.TODO_STATE['expanded_daily']
+        elif mode == 'WEEKLY': expanded = state.TODO_STATE['expanded_weekly']
+        else: expanded = state.TODO_STATE['expanded_project']
         
         # Update global state sync
         state.TODO_STATE['mode'] = mode
+        state.TODO_STATE['week_offset'] = week_offset
         state.TODO_STATE['backlog_active'] = backlog_active
         state.TODO_STATE['isolation_filter'] = isolation_filter
         state.TODO_STATE['isolation_type'] = isolation_type
@@ -703,22 +739,21 @@ def show_todo_list(stdscr):
 
         # 2. Apply Tag/Feature Filter
         if active_filter:
-            sel_tags, status_mode, inc_tagless = active_filter
+            sel_tags, status_mode, inc_tagless, prio_min = active_filter
             filtered = []
             for t in todos:
                 t_tags = t.get('tags', [])
                 has_match = any(tag in t_tags for tag in sel_tags)
                 is_tagless = not t_tags
                 is_pending = t['status'] == 'pending'
+                t_prio = t.get('priority', 1)
                 
-                # Logic: Content Match AND Status Match
+                # Logic: Content Match AND Status Match AND Priority Match
                 
                 # 1. Content Match
                 content_match = False
                 if not sel_tags and not inc_tagless: 
                     content_match = True 
-                    if inc_tagless: content_match = is_tagless
-                    else: content_match = True
                 else:
                     if has_match: content_match = True
                     if inc_tagless and is_tagless: content_match = True
@@ -728,7 +763,11 @@ def show_todo_list(stdscr):
                 if status_mode == 'PENDING' and not is_pending: status_match = False
                 if status_mode == 'DONE' and is_pending: status_match = False
                 
-                if content_match and status_match:
+                # 3. Priority Match
+                prio_match = True
+                if prio_min and t_prio < prio_min: prio_match = False
+                
+                if content_match and status_match and prio_match:
                     filtered.append(t)
             todos = filtered
 
@@ -749,8 +788,84 @@ def show_todo_list(stdscr):
                 done_c = sum(1 for i in items if i['status']=='done')
                 tree.append({'type': 'group', 'key': k, 'items': items, 'done': done_c, 'total': len(items)})
                 if k in expanded or (isolation_filter and isolation_type == 'date') or backlog_active:
-                    for item in items:
+                    # Sort items by priority (Highest first)
+                    for item in sorted(items, key=lambda x: x.get('priority', 1), reverse=True):
                         tree.append({'type': 'item', 'data': item, 'parent': k})
+        
+        elif mode == 'WEEKLY':
+            # Group by Week -> Day (Week starts Saturday)
+            w_groups = {}
+            for t in todos:
+                d_str = t.get('date', 'Unknown')
+                try:
+                    dt = datetime.strptime(d_str, "%Y-%m-%d")
+                    # Saturday Start (5)
+                    days_sub = (dt.weekday() - 5) % 7
+                    start_of_week = dt - timedelta(days=days_sub)
+                    end_of_week = start_of_week + timedelta(days=6)
+                    w_key = start_of_week.strftime("%Y-%m-%d")
+                    label = f"WEEK: {start_of_week.strftime('%b %d')} - {end_of_week.strftime('%b %d')}"
+                except:
+                    w_key = "Unknown"
+                    label = "Unknown Date"
+                
+                if w_key not in w_groups: w_groups[w_key] = {'label': label, 'items': []}
+                w_groups[w_key]['items'].append(t)
+            
+            sorted_weeks = sorted(w_groups.keys(), reverse=True)
+            
+            for i_w, wk in enumerate(sorted_weeks):
+                w_data = w_groups[wk]
+                w_items = w_data['items']
+                done_w = sum(1 for i in w_items if i['status']=='done')
+                is_last_week = (i_w == len(sorted_weeks) - 1)
+                
+                tree.append({'type': 'week_group', 'key': wk, 'label': w_data['label'], 'done': done_w, 'total': len(w_items), 'is_last': is_last_week})
+                
+                if wk in expanded or backlog_active:
+                    # Group by Project
+                    p_groups = {}
+                    for t in w_items:
+                        p = t.get('project', 'General') or "General"
+                        if p not in p_groups: p_groups[p] = []
+                        p_groups[p].append(t)
+                    
+                    sorted_projs = sorted(p_groups.keys(), key=lambda x: (0 if x=='General' else 1, x))
+                    
+                    for i_p, p_name in enumerate(sorted_projs):
+                        p_items = p_groups[p_name]
+                        done_p = sum(1 for i in p_items if i['status']=='done')
+                        # Composite key for Project inside Week
+                        wk_p_key = f"{wk}|{p_name}"
+                        is_last_proj = (i_p == len(sorted_projs) - 1)
+                        
+                        tree.append({'type': 'week_project_group', 'key': wk_p_key, 'label': p_name, 'done': done_p, 'total': len(p_items), 'parent': wk, 'is_last': is_last_proj, 'parent_last': is_last_week})
+                        
+                        if wk_p_key in expanded or backlog_active:
+                            d_groups = {}
+                            for t in p_items:
+                                d = t.get('date', 'Unknown')
+                                if d not in d_groups: d_groups[d] = []
+                                d_groups[d].append(t)
+                            
+                            sorted_days = sorted(d_groups.keys())
+                            for i_d, d in enumerate(sorted_days):
+                                d_items = d_groups[d]
+                                done_d = sum(1 for i in d_items if i['status']=='done')
+                                # Key for Day: WEEK|PROJ|DATE
+                                d_key = f"{wk_p_key}|{d}"
+                                is_last_day = (i_d == len(sorted_days) - 1)
+                                
+                                tree.append({'type': 'week_project_date_group', 'key': d_key, 'date': d, 'done': done_d, 'total': len(d_items), 'parent': wk_p_key, 'is_last': is_last_day, 'parent_last': is_last_proj})
+                                
+                                if jump_target == d_key: sel_idx = len(tree) - 1; jump_target = None
+        
+                                if d_key in expanded or backlog_active:
+                                     d_items_sorted = sorted(d_items, key=lambda x: (-x.get('priority', 1), x.get('content', '')))
+                                     for i_t, item in enumerate(d_items_sorted):
+                                         is_last_item = (i_t == len(d_items_sorted) - 1)
+                                         tree.append({'type': 'item', 'data': item, 'parent': d_key, 'is_last': is_last_item, 'parent_last': is_last_day})
+
         else: # PROJECT MODE (Restructured: Project -> Date -> Task)
             p_groups = {}
             for t in todos:
@@ -783,7 +898,8 @@ def show_todo_list(stdscr):
                     sorted_dates = sorted(d_groups.keys(), reverse=True)
                     
                     for i_d, d in enumerate(sorted_dates):
-                        d_items = sorted(d_groups[d], key=lambda x: x.get('content', '')) 
+                        # Sort items by priority (Highest first)
+                        d_items = sorted(d_groups[d], key=lambda x: (-x.get('priority', 1), x.get('content', '')))
                         d_done = sum(1 for i in d_items if i['status']=='done')
                         d_key = f"{p}|{d}"
                         is_last_date = (i_d == len(sorted_dates) - 1)
@@ -807,13 +923,46 @@ def show_todo_list(stdscr):
         elif sel_idx >= len(tree): sel_idx = len(tree) - 1
         if sel_idx < 0: sel_idx = 0
 
+        # JUMP TO FLASHING TASK (If priority just changed)
+        flash_id = state.TODO_STATE.get('flash_task_id')
+        flash_time = state.TODO_STATE.get('flash_time', 0)
+        if flash_id and time.time() - flash_time < 0.5: # Only jump immediately after change
+            for idx, node in enumerate(tree):
+                if node['type'] == 'item' and node['data']['id'] == flash_id:
+                    sel_idx = idx
+                    break
+
         # Tabs Header
         tabs = f" [DAILY] " if mode=='DAILY' else "  DAILY  "
+        tabs += f" [WEEKLY] " if mode=='WEEKLY' else "  WEEKLY  "
         tabs += f" [PROJECT] " if mode=='PROJECT' else "  PROJECT  "
         safe_addstr(stdscr, 1, 2, tabs, curses.color_pair(3)|curses.A_BOLD)
         
+        indicator_x = 2 + len(tabs) + 2
+        
+        if mode == 'WEEKLY':
+             wk_label = " [ WEEK VIEW ] "
+             if tree and 0 <= sel_idx < len(tree):
+                 node = tree[sel_idx]
+                 wk_key = None
+                 if node['type'] == 'week_group': wk_key = node['key']
+                 elif node['type'] in ['day_group', 'item']:
+                     p = node.get('parent')
+                     if p:
+                         if '|' in p: wk_key = p.split('|')[0]
+                         else: wk_key = p
+                 
+                 if wk_key and wk_key != "Unknown":
+                     try:
+                         dt = datetime.strptime(wk_key, "%Y-%m-%d")
+                         end_dt = dt + timedelta(days=6)
+                         wk_label = f" [{dt.strftime('%b %d')} - {end_dt.strftime('%b %d')}] "
+                     except: pass
+             
+             safe_addstr(stdscr, 1, indicator_x, wk_label, curses.color_pair(4)|curses.A_BOLD)
+             indicator_x += len(wk_label) + 1
+        
         # Backlog Indicator
-        indicator_x = 25
         if backlog_active:
             safe_addstr(stdscr, 1, indicator_x, " [BACKLOG VIEW] ", curses.color_pair(5)|curses.A_BOLD|curses.A_REVERSE)
             indicator_x += 17
@@ -835,25 +984,81 @@ def show_todo_list(stdscr):
             
         # Filter Indicator
         if active_filter:
-             safe_addstr(stdscr, 1, indicator_x, " [FILTER ACTIVE] ", curses.color_pair(2)|curses.A_BOLD|curses.A_REVERSE)
+             f_col = 2
+             if isolation_filter and isolation_type == 'project':
+                  f_col = p_colors.get(isolation_filter, 2)
+             elif isolation_filter and isolation_type == 'date_group':
+                  p_part = isolation_filter.split('|')[0]
+                  f_col = p_colors.get(p_part, 2)
+             safe_addstr(stdscr, 1, indicator_x, " [FILTER ACTIVE] ", curses.color_pair(f_col)|curses.A_BOLD|curses.A_REVERSE)
             
         safe_addstr(stdscr, 2, 2, "="*(w-4), curses.color_pair(3))
         
         scroll_idx = draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delete_pending_idx)
         
-        nav_hint = "[TAB] View  [B] Backlog: " + ("ON " if backlog_active else "OFF")
-        safe_addstr(stdscr, h-1, 2, f"{nav_hint}  [f] Focus  [T] Timer  [k] Today  [U] Undo  [S] Start  [F] Filter  [I] Isolate  [Space] Dtls  [Enter] Toggle  [D] Del  [ESC] Back", curses.color_pair(4))
+        # footer 
+        nav_hint = "[TAB] View  [s] Start  [B] Backlog: " + ("ON " if backlog_active else "OFF")
+        full_help = f"{nav_hint}  [f] Focus  [v] Verbose  [1-5] Prio  [T] Timer  [k] Today [U] Undo  [q] Quick  [S] Start  [F] Filter  [I] Isolate  [Space] Dtls  [Enter] Toggle  [D] Del  [ESC] Back"
+        if mode == 'WEEKLY': full_help += "  [[/]] Week Nav"
+        
+        # Wrap footer text
+        help_lines = textwrap.wrap(full_help, w - 4)
+        footer_h = len(help_lines)
+        
+        # Redraw tree with adjusted bottom margin to account for wrapped footer
+        # We need to pass the dynamic footer height to draw_todo_tree or adjust max_y
+        # Current draw_todo_tree handles bottom_margin. 
+        # For simplicity, we just render footer over the last lines if needed, 
+        # or we could modify draw_todo_tree to accept a dynamic margin.
+        
+        # Let's render footer
+        for i, line in enumerate(help_lines):
+            safe_addstr(stdscr, h - footer_h + i, 2, line, curses.color_pair(4) | curses.A_DIM)
+
         stdscr.refresh()
         stdscr.nodelay(True); k = stdscr.getch(); stdscr.nodelay(False)
         
         if k == -1: time.sleep(0.05); continue
         
+        if k == ord('v'):
+            state.TODO_STATE['verbose_mode'] = not state.TODO_STATE.get('verbose_mode', False)
+            continue
+
+        if ord('1') <= k <= ord('5'):
+            if tree and 0 <= sel_idx < len(tree):
+                node = tree[sel_idx]
+                if node['type'] == 'item':
+                    t_id = node['data']['id']
+                    controller.set_task_priority(t_id, k - ord('0'))
+                    state.TODO_STATE['flash_task_id'] = t_id
+                    state.TODO_STATE['flash_time'] = time.time()
+            continue
+
         if k in [ord('k')]:
             if tree and 0 <= sel_idx < len(tree):
                 node = tree[sel_idx]
                 if node['type'] == 'item':
-                    controller.move_todo_to_today(node['data']['id'])
-                    # Maybe clear selection or jump? For now just refresh.
+                    t_item = node['data']
+                    controller.move_todo_to_today(t_item['id'])
+                    
+                    # Auto-expand target in Weekly/Project views
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    p = t_item.get('project', 'General') or "General"
+                    
+                    if mode == 'WEEKLY':
+                        # Calculate Week Key for Today
+                        dt = datetime.now()
+                        days_sub = (dt.weekday() - 5) % 7
+                        start_of_week = dt - timedelta(days=days_sub)
+                        wk_key = start_of_week.strftime("%Y-%m-%d")
+                        
+                        expanded.add(wk_key)
+                        expanded.add(f"{wk_key}|{p}")
+                        expanded.add(f"{wk_key}|{p}|{today_str}")
+                    elif mode == 'PROJECT':
+                        expanded.add(p)
+                        expanded.add(f"{p}|{today_str}")
+
                     delete_pending_idx = -1
             continue
 
@@ -874,13 +1079,13 @@ def show_todo_list(stdscr):
                         if t['id'] == t_id:
                             t['focused'] = not t.get('focused', False)
                             changed = True; break
-                elif node['type'] in ['group', 'project', 'date_group']:
+                elif node['type'] in ['group', 'project', 'date_group', 'week_group', 'day_group', 'week_project_group', 'week_project_date_group']:
                      # Get all IDs currently visible in this branch
                      child_ids = []
                      curr = sel_idx + 1
                      while curr < len(tree):
                          child = tree[curr]
-                         if child.get('parent') == node['key'] or child.get('parent') == f"{node.get('key')}|{node.get('date')}" or (node['type']=='project' and child.get('parent', '').startswith(node['key'])):
+                         if child.get('parent') == node['key'] or (node['type'] in ['project', 'week_group', 'week_project_group'] and child.get('parent', '').startswith(node['key'])):
                              if child['type'] == 'item':
                                  child_ids.append(child['data']['id'])
                          else: break
@@ -906,7 +1111,7 @@ def show_todo_list(stdscr):
                      item = node['data']
                      d = select_duration(stdscr)
                      if d:
-                         controller.start_new_session(item.get('project', 'General'), item['content'], d)
+                         controller.start_new_session(item.get('project', 'General'), item['content'], d, item.get('priority', 1))
                          return 'TIMER'
 
         if k == ord(' '):
@@ -943,6 +1148,23 @@ def show_todo_list(stdscr):
         if k in [ord('x'), ord('X')]:
             if mode == 'DAILY':
                 expanded.update(set(t.get('date', 'Unknown') for t in todos))
+            elif mode == 'WEEKLY':
+                for t in todos:
+                    d_str = t.get('date', 'Unknown')
+                    try:
+                        dt = datetime.strptime(d_str, "%Y-%m-%d")
+                        days_sub = (dt.weekday() - 5) % 7
+                        start_of_week = dt - timedelta(days=days_sub)
+                        wk_key = start_of_week.strftime("%Y-%m-%d")
+                    except:
+                        wk_key = "Unknown"
+                    
+                    p = t.get('project', 'General') or "General"
+                    
+                    if wk_key != "Unknown":
+                        expanded.add(wk_key)
+                        expanded.add(f"{wk_key}|{p}")
+                        expanded.add(f"{wk_key}|{p}|{d_str}")
             else:
                 for t in todos:
                     p = t.get('project', 'General') or 'General'
@@ -979,12 +1201,30 @@ def show_todo_list(stdscr):
                 sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
             
         if k in [ord('u'), ord('U')]:
-             controller.restore_last_deleted_item()
+             undone = controller.restore_last_deleted_item()
+             if undone and undone['type'] in ['priority', 'todo', 'add', 'toggle']:
+                  # Flash the item that was affected by undo
+                  target_id = undone.get('id') or (undone['data'].id if undone['type'] == 'todo' else None)
+                  if target_id:
+                       state.TODO_STATE['flash_task_id'] = target_id
+                       state.TODO_STATE['flash_time'] = time.time()
              delete_pending_idx = -1
         
         if k == 9: # TAB
-            mode = 'PROJECT' if mode == 'DAILY' else 'DAILY'
+            if mode == 'DAILY': mode = 'WEEKLY'
+            elif mode == 'WEEKLY': mode = 'PROJECT'
+            else: mode = 'DAILY'
             sel_idx = 0; scroll_idx = 0; delete_pending_idx = -1
+        elif k == ord('['):
+            if mode == 'WEEKLY':
+                 for i in range(sel_idx - 1, -1, -1):
+                     if tree[i]['type'] == 'week_group':
+                         sel_idx = i; break
+        elif k == ord(']'):
+            if mode == 'WEEKLY':
+                 for i in range(sel_idx + 1, len(tree)):
+                     if tree[i]['type'] == 'week_group':
+                         sel_idx = i; break
         elif k in [curses.KEY_DOWN, ord('j')]: 
             sel_idx += 1; delete_pending_idx = -1
         elif k in [curses.KEY_UP, ord('K')]: 
@@ -992,7 +1232,7 @@ def show_todo_list(stdscr):
         elif k in [10, 13, 529]: # Enter (13) or Ctrl+Enter (10/529)
             if tree:
                 node = tree[sel_idx]
-                if node['type'] in ['group', 'project', 'date_group']:
+                if node['type'] in ['group', 'project', 'date_group', 'week_group', 'day_group', 'week_project_group', 'week_project_date_group']:
                     key = node['key']
                     if key in expanded: expanded.remove(key)
                     else: 
@@ -1027,27 +1267,85 @@ def show_todo_list(stdscr):
                     # Optional: Prompt to confirm project deletion?
                     # For now, just delete as we have undo
                     controller.delete_project(node['key'])
+        elif k in [ord('q'), ord('Q')]:
+            new_p = quick_add_todo_dialog(stdscr); delete_pending_idx = -1
+            if new_p:
+                mode = 'PROJECT'
         elif k in [ord('n'), ord('N')]:
             new_p = add_new_todo_dialog(stdscr); delete_pending_idx = -1
             if new_p:
                 mode = 'PROJECT'
+        elif k == 27: # ESC
+            return 'TIMER'
 
 def show_quick_start_dialog(stdscr):
+
     stdscr.erase(); h, w = stdscr.getmaxyx()
-    p, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects())
+
+    p, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "PROJECT", get_unique_projects(), allow_custom=True)
+
     if not p: return 'HISTORY'
-    
+
+
+
+    if p not in get_unique_projects():
+
+        controller.add_project(p)
+
+
+
     # Merge pending todos + history tasks
-    pending_todos = [t['content'] for t in storage.load_todos() if t.get('project') == p and t.get('status') == 'pending']
+
+    all_todos = storage.load_todos()
+
+    pending_todos = [t for t in all_todos if t.get('project') == p and t.get('status') == 'pending']
+
+    pending_names = [t['content'] for t in pending_todos]
+
+
+
     history_tasks = get_unique_tasks(p)
-    history_tasks = [t for t in history_tasks if t not in pending_todos]
-    all_tasks = pending_todos + history_tasks
-    
-    t, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "TASK", all_tasks)
+
+    history_tasks = [t for t in history_tasks if t not in pending_names]
+
+    all_task_names = pending_names + history_tasks
+
+
+
+    t, _ = fuzzy_select(stdscr, h//2 - 6, w//2 - 20, "TASK", all_task_names, allow_custom=True)
+
     if not t: return 'HISTORY'
-    
+
+
+
+    # Resolve priority & add to tree if new
+
+    prio = 1
+
+    match = next((x for x in pending_todos if x['content'] == t), None)
+
+    if match: 
+
+        prio = match.get('priority', 1)
+
+    elif t not in pending_names:
+
+        # New task or history task not in todo tree
+
+        from datetime import datetime
+
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        controller.add_todo(t, today, p, [], "", 1)
+
+
+
     d = select_duration(stdscr)
+
     if not d: return 'HISTORY'
-    
-    controller.start_new_session(p, t, d)
+
+
+
+    controller.start_new_session(p, t, d, prio)
+
     return 'TIMER'

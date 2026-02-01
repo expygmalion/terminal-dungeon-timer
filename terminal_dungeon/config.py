@@ -36,3 +36,19 @@ BIG_FONT = {
 }
 
 PROJECT_COLORS_NAMES = ["Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White", "Crimson", "Lime", "Violet"]
+
+PRIORITY_LABELS = {
+    5: "Must be done now",
+    4: "Time-sensitive",
+    3: "Time-flexible",
+    2: "Can be delayed",
+    1: "No deadline relevance"
+}
+
+XP_MULTIPLIERS = {
+    5: 2.0,
+    4: 1.5,
+    3: 1.2,
+    2: 1.0,
+    1: 0.8
+}

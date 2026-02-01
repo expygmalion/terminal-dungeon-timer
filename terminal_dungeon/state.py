@@ -13,10 +13,13 @@ UNDO_STACK = []
 TODO_STATE = {
     'expanded_daily': set(),
     'expanded_project': set(),
+    'expanded_weekly': set(),
     'mode': 'DAILY',
     'backlog_active': False,
     'isolation_filter': None,
     'isolation_type': None,
     'active_filter': None,
-    'focus_queue': []
+    'focus_queue': [],
+    'verbose_mode': False,
+    'week_offset': 0
 }

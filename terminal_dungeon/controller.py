@@ -6,16 +6,22 @@ from . import state
 from .logic import clean_tags, calculate_stats
 from .model import Task, Session
 
+from .config import XP_MULTIPLIERS
+
 def init_system():
     state.TIMER.set_callback('save_session', _save_session_callback)
 
 def _save_session_callback(status, actual_duration, context):
+    # Dynamic XP Multiplier based on Priority
+    mult = XP_MULTIPLIERS.get(context.priority, 1.0)
+    
     s = Session(
         project=context.project,
         task=context.task,
         duration_minutes=context.duration_secs // 60,
         status=status,
-        actual_duration_seconds=actual_duration
+        actual_duration_seconds=actual_duration,
+        xp_multiplier=mult
     )
     history = storage.load_history()
     history.insert(0, s)
@@ -27,13 +33,13 @@ def _save_session_callback(status, actual_duration, context):
 
 # Delegates
 def tick_timer(): state.TIMER.tick()
-def start_new_session(p, t, d): state.TIMER.start(p, t, d)
+def start_new_session(p, t, d, priority=1): state.TIMER.start(p, t, d, priority)
 def terminate_session(): state.TIMER.stop()
 def pause_timer(): state.TIMER.pause()
 def resume_timer(): state.TIMER.resume()
 
 # --- Todo Actions ---
-def add_todo(content, date_str, project, tags, description=""):
+def add_todo(content, date_str, project, tags, description="", priority=1):
     todos = storage.load_todos()
     new_todo = Task(
         content=content,
@@ -41,7 +47,8 @@ def add_todo(content, date_str, project, tags, description=""):
         date=date_str,
         project=project if project else "General",
         tags=clean_tags(tags),
-        status="pending"
+        status="pending",
+        priority=priority
     )
     todos.append(new_todo)
     storage.save_todos(todos)
@@ -56,6 +63,16 @@ def complete_matching_todo(project, content):
             t.status = 'done'
             changed = True
     if changed: storage.save_todos(todos)
+
+def set_task_priority(todo_id, priority, record_undo=True):
+    todos = storage.load_todos()
+    for t in todos:
+        if t.id == todo_id:
+            if record_undo:
+                state.UNDO_STACK.append({'type': 'priority', 'id': todo_id, 'old_priority': t.priority})
+            t.priority = priority
+            break
+    storage.save_todos(todos)
 
 def toggle_todo(todo_id, duration_mins=30, record_undo=True):
     todos = storage.load_todos()
@@ -73,6 +90,9 @@ def toggle_todo(todo_id, duration_mins=30, record_undo=True):
     if target.status == 'pending':
         target.status = 'done'
         
+        # Apply multiplier for manual log too
+        mult = XP_MULTIPLIERS.get(target.priority, 1.0)
+        
         sess_id = str(uuid.uuid4())
         session = Session(
             id=sess_id,
@@ -80,7 +100,8 @@ def toggle_todo(todo_id, duration_mins=30, record_undo=True):
             task=target.content,
             duration_minutes=duration_mins,
             status="completed",
-            manual_log=True
+            manual_log=True,
+            xp_multiplier=mult
         )
         save_session_data(session)
         target.last_session_id = sess_id
@@ -123,7 +144,9 @@ def move_todo_to_today(todo_id):
     today = datetime.now().strftime("%Y-%m-%d")
     for t in todos:
         if t.id == todo_id:
-            t.date = today
+            if t.date != today:
+                state.UNDO_STACK.append({'type': 'move_date', 'id': todo_id, 'old_date': t.date})
+                t.date = today
             break
     storage.save_todos(todos)
 
@@ -165,7 +188,7 @@ def delete_project(name):
         storage.save_history(new_history)
 
 def restore_last_deleted_item():
-    if not state.UNDO_STACK: return False
+    if not state.UNDO_STACK: return None
     action = state.UNDO_STACK.pop()
     
     if action['type'] == 'todo':
@@ -192,8 +215,19 @@ def restore_last_deleted_item():
     elif action['type'] == 'toggle':
         # Undo toggle = toggle back (no new undo record)
         toggle_todo(action['id'], record_undo=False)
+    
+    elif action['type'] == 'priority':
+        set_task_priority(action['id'], action['old_priority'], record_undo=False)
+
+    elif action['type'] == 'move_date':
+        todos = storage.load_todos()
+        for t in todos:
+            if t.id == action['id']:
+                t.date = action['old_date']
+                break
+        storage.save_todos(todos)
         
-    return True
+    return action
 
 # --- History/Session Actions ---
 def save_session_data(session):

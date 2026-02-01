@@ -12,12 +12,16 @@ class Task:
     status: str = "pending" # pending, done
     description: str = ""
     focused: bool = False
+    priority: int = 1 # 1-5
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     last_session_id: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)
+
+    def copy(self):
+        return self.to_dict()
 
     @classmethod
     def from_dict(cls, data):
@@ -46,6 +50,7 @@ class Session:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     actual_duration_seconds: int = 0
     manual_log: bool = False
+    xp_multiplier: float = 1.0
     
     def to_dict(self):
         return asdict(self)

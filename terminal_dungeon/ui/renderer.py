@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 import textwrap
 from .. import state
-from ..config import BIG_FONT
+from ..config import BIG_FONT, PRIORITY_LABELS, XP_MULTIPLIERS
 
 def safe_addstr(stdscr, y, x, text, attr=0):
     try: 
@@ -48,7 +48,8 @@ def draw_pip_timer(stdscr):
     width = max(30, min(w-4, len(task) + 4), min(w-4, len(proj) + 15))
     height = 5
     
-    y = h - 6
+    # Moved up from h-6 to accommodate wrapped footers
+    y = h - 10
     x = (w - width) // 2
     
     if y < 0: return
@@ -91,14 +92,18 @@ def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
     safe_addstr(stdscr, cy+1, cx+2, f"  {p_name.upper()}  ", p_attr)
     
     d_attr = st_attr | curses.A_REVERSE if active_field == 'DATE' else st_attr
-    safe_addstr(stdscr, cy+2, cx+4, f" {item.get('date', 'NA')} ", d_attr)
+    added_dt = item.get('timestamp', '')[:10]
+    date_str = f" TARGET: {item.get('date', 'NA')}  ADDED: {added_dt} "
+    safe_addstr(stdscr, cy+2, cx+4, date_str, d_attr)
     
     status = item.get('status', 'PENDING').upper()
     s_col = curses.color_pair(2 if status == 'DONE' or status == 'COMPLETED' else 5)
     safe_addstr(stdscr, cy+1, cx+card_w-len(status)-6, f" {status} ", s_col | curses.A_BOLD | curses.A_REVERSE)
     
     # Dynamic Meta Label
-    meta = item.get('meta_label', " REWARD: 30 XP ")
+    prio = item.get('priority', 1)
+    mult = XP_MULTIPLIERS.get(prio, 1.0)
+    meta = f" REWARD: {int(30 * mult)} XP ({mult}x) "
     safe_addstr(stdscr, cy+2, cx+card_w-len(meta)-4, meta, st_attr)
     
     # Tags
@@ -109,7 +114,7 @@ def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
     safe_addstr(stdscr, cy+3, cx+4, t_str, t_attr)
     
     # Content
-    c_attr = main_attr | curses.color_pair(4) if active_field == 'CONTENT' else main_attr
+    c_attr = (curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD) if active_field == 'CONTENT' else main_attr
     content, inner_w = item.get('content', ''), card_w - 8
     lines = []
     # Split by newline first
@@ -128,11 +133,11 @@ def draw_neobrutalist_card(stdscr, item, p_colors, active_field=None):
     if desc or active_field == 'DESCRIPTION':
         safe_addstr(stdscr, cy+11, cx+2, "▀" * (card_w-4), main_attr)
         desc_h_attr = main_attr | curses.A_UNDERLINE
-        if active_field == 'DESCRIPTION': desc_h_attr |= curses.color_pair(4)
+        if active_field == 'DESCRIPTION': desc_h_attr = curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD | curses.A_UNDERLINE
         safe_addstr(stdscr, cy+12, cx+4, "DESCRIPTION:", desc_h_attr)
         
         desc_b_attr = main_attr
-        if active_field == 'DESCRIPTION': desc_b_attr |= curses.color_pair(4)
+        if active_field == 'DESCRIPTION': desc_b_attr = curses.color_pair(4) | curses.A_REVERSE | curses.A_BOLD
         
         d_lines = []
         raw_d_lines = desc.split('\n')
@@ -232,57 +237,174 @@ def draw_todo_tree(stdscr, tree, sel_idx, scroll_idx, today_str, p_colors, delet
             safe_addstr(stdscr, y, 6, f"{lbl:<23} {pct:>3}%", attr|d_attr)
             y += 1
 
+        elif node['type'] == 'week_group':
+            k = node['key']
+            lbl = node.get('label', k)
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            is_open = k in state.TODO_STATE['expanded_weekly']
+            icon = "[-]" if is_open else "[+]"
+            safe_addstr(stdscr, y, 2, f"{icon} {lbl:<35} {pct:>3}%", attr|curses.color_pair(3)|curses.A_BOLD)
+            y += 1
+
+        elif node['type'] == 'week_project_group':
+            k = node['key']
+            lbl = node.get('label', k)
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            is_open = k in state.TODO_STATE['expanded_weekly']
+            icon = "[-]" if is_open else "[+]"
+            col = curses.color_pair(p_colors.get(lbl, 3))
+            safe_addstr(stdscr, y, 4, f"{icon} {lbl:<25} {pct:>3}%", attr|col|curses.A_BOLD)
+            y += 1
+            
+        elif node['type'] == 'week_project_date_group':
+            d, p_name = node['date'], node['parent'].split('|')[1] # Parent is WEEK|PROJ
+            lbl = d
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                lbl = dt.strftime("%a %d/%b/%Y").upper()
+                lbl = f"★ {lbl}" if d == today_str else f"  {lbl}"
+            except: pass
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            col = curses.color_pair(p_colors.get(p_name, 3))
+            is_backlog = d < today_str and node['done'] < node['total']
+            line = ("    ├─" if not node['is_last'] else "    └─") if not is_backlog else ("    ├╌" if not node['is_last'] else "    └╌")
+            d_attr = curses.color_pair(5)|curses.A_BOLD if is_backlog else curses.color_pair(4)
+            safe_addstr(stdscr, y, 2, line, col)
+            safe_addstr(stdscr, y, 8, f"{lbl:<23} {pct:>3}%", attr|d_attr)
+            y += 1
+            
+        elif node['type'] == 'day_group':
+            d = node['date']
+            lbl = d
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                lbl = dt.strftime("%a %d/%b/%Y").upper()
+                lbl = f"★ {lbl}" if d == today_str else f"  {lbl}"
+            except: pass
+            pct = int((node['done']/node['total'])*100) if node['total'] > 0 else 0
+            
+            line = ("  ├─" if not node['is_last'] else "  └─")
+            safe_addstr(stdscr, y, 2, line, curses.color_pair(3))
+            safe_addstr(stdscr, y, 6, f"{lbl:<23} {pct:>3}%", attr|curses.color_pair(4))
+            y += 1
+
         elif node['type'] == 'item':
             item = node['data']
             st = "[x]" if item['status']=='done' else "[ ]"
             is_overdue = (item.get('date', '9999-99-99') < today_str) and (item['status'] == 'pending')
             col = curses.color_pair(2) if item['status'] == 'done' else (curses.color_pair(5) if is_overdue else 0)
             
+            # Flash effect
+            flash_id = state.TODO_STATE.get('flash_task_id')
+            flash_time = state.TODO_STATE.get('flash_time', 0)
+            if flash_id == item['id'] and time.time() - flash_time < 1.5:
+                # Use a bright high-contrast background for flashing
+                col = curses.color_pair(6) | curses.A_BOLD | curses.A_REVERSE
+
             # Focus Highlighting
-            if item.get('focused', False):
+            elif item.get('focused', False):
                  p_name = item.get('project', 'General')
                  p_col_id = p_colors.get(p_name, 0)
                  col = curses.color_pair(p_col_id) | curses.A_REVERSE if p_col_id else curses.A_REVERSE
 
-            t_str = " " + " ".join([f"#{t}" for t in item.get('tags', []) if t])
+            # Verbose Mode Data
+            verbose = state.TODO_STATE.get('verbose_mode', False)
+            priority = item.get('priority', 1)
+            p_label = PRIORITY_LABELS.get(priority, "")
+            tags = item.get('tags', [])
             
+            prio_col = curses.color_pair(40 + priority - 1)
+            proj_col = curses.color_pair(p_colors.get(item.get('project', 'General'), 0))
+
             if state.TODO_STATE['mode'] == 'DAILY':
                 p_name = item.get('project', 'General')
                 if p_name != "General" and not is_overdue and item['status'] != 'done' and not item.get('focused', False):
                     try: col = curses.color_pair(p_colors.get(p_name, 0))
                     except: pass
                 
-                content_text = f"{('╌╌ ' if is_overdue else '   ')}{st} {p_name}: {item['content']}{t_str}"
-                lines = wrapper.wrap(content_text)
-                for li, line_text in enumerate(lines):
-                    if y >= max_y: break
-                    safe_addstr(stdscr, y, 4 if li==0 else 8, line_text, attr|col)
-                    y += 1
-            else:
-                p_name = node.get('parent', '').split('|')[0]
-                t_col = curses.color_pair(p_colors.get(p_name, 3))
+                content_text = f"{('╌╌ ' if is_overdue else '   ')}{st} {p_name}: {item['content']}"
+                start_x = 4
+            elif state.TODO_STATE['mode'] == 'WEEKLY':
+                # Week -> Project -> Date -> Item
+                # Parent is Date Group (week_project_date_group)
+                # Parent key: WEEK|PROJ|DATE
+                # p_name for color is PROJ
+                try: p_name = node.get('parent', '').split('|')[1]
+                except: p_name = 'General'
                 
+                t_col = curses.color_pair(p_colors.get(p_name, 3))
                 tree_char_1 = '│' if not node.get('parent_last') else ' '
                 tree_char_2 = '├' if not node.get('is_last') else '└'
                 status_char = '╌' if item['status'] == 'pending' else '─'
                 
+                prefix = f"    {tree_char_1}  {tree_char_2}{status_char}"
+                content_text = f"{st} {item['content']}"
+                start_x = 11
+            else:
+                p_name = node.get('parent', '').split('|')[0]
+                t_col = curses.color_pair(p_colors.get(p_name, 3))
+                tree_char_1 = '│' if not node.get('parent_last') else ' '
+                tree_char_2 = '├' if not node.get('is_last') else '└'
+                status_char = '╌' if item['status'] == 'pending' else '─'
                 prefix = f"  {tree_char_1}  {tree_char_2}{status_char}"
+                content_text = f"{st} {item['content']}"
+                start_x = 9
+
+            # Build Full String and calculate offsets
+            full_text = content_text
+            prio_start = -1
+            tags_start = -1
+            
+            if verbose:
+                prio_str = f" | {p_label}"
+                tags_str = " " + " ".join([f"#{t.upper()}" for t in tags if t])
+                prio_start = len(full_text)
+                full_text += prio_str
+                tags_start = len(full_text)
+                full_text += tags_str
+
+            lines = wrapper.wrap(full_text)
+            curr_y = y
+            char_acc = 0
+            
+            for li, line_text in enumerate(lines):
+                if curr_y >= max_y: break
+                x_off = start_x if li == 0 else (start_x if state.TODO_STATE['mode'] == 'DAILY' else start_x)
                 
-                content_text = f"{st} {item['content']}{t_str}"
-                lines = wrapper.wrap(content_text)
-                
-                for li, line_text in enumerate(lines):
-                    if y >= max_y: break
+                if state.TODO_STATE['mode'] in ['PROJECT', 'WEEKLY']:
                     if li == 0:
-                        safe_addstr(stdscr, y, 2, prefix, t_col)
-                        safe_addstr(stdscr, y, 9, line_text, attr|col)
+                        safe_addstr(stdscr, curr_y, 2, prefix, t_col)
                     else:
-                        # Continuation
                         cont_char = '│' if not node.get('is_last') else ' '
-                        cont_prefix = f"  {tree_char_1}  {cont_char} "
-                        safe_addstr(stdscr, y, 2, cont_prefix, t_col)
-                        safe_addstr(stdscr, y, 9, line_text, attr|col)
-                    y += 1
+                        # Adjust for Weekly indentation
+                        indent_prefix = "    " if state.TODO_STATE['mode'] == 'WEEKLY' else "  "
+                        safe_addstr(stdscr, curr_y, 2, f"{indent_prefix}{tree_char_1}  {cont_char} ", t_col)
+
+                # Character-by-character coloring for the line
+                for char_idx, char in enumerate(line_text):
+                    global_idx = char_acc + char_idx
+                    c_attr = attr | col # Default content color
+                    
+                    if verbose:
+                        if prio_start <= global_idx < tags_start:
+                            c_attr = attr | prio_col
+                        elif global_idx >= tags_start:
+                            c_attr = attr | proj_col
+                    
+                    try: stdscr.addstr(curr_y, x_off + char_idx, char, c_attr)
+                    except: pass
+                
+                char_acc += len(line_text) + 1 # +1 for the space wrapper adds? textwrap join is usually space
+                # but wrap() returns a list of already-split strings. 
+                # Actually char_acc should track the position in full_text.
+                # Since wrap() removes leading/trailing spaces, let's find the substring.
+                # Robust approach: find the next matching slice of full_text
+                match_start = full_text.find(line_text, char_acc - len(line_text) - 2) 
+                if match_start != -1:
+                    char_acc = match_start + len(line_text)
+                
+                curr_y += 1
+            y = curr_y
             
         if ii == delete_pending_idx:
             # Draw on the last line of the item (y is already incremented)
@@ -328,3 +450,8 @@ def setup_colors():
             curses.init_pair(pair_id, xterm_256_map[i], -1)
         else:
             curses.init_pair(pair_id, std_colors[i], -1)
+
+    # Priority Gradient (40-44 for 1-5)
+    priority_colors = [244, 75, 220, 208, 198]
+    for i, col in enumerate(priority_colors):
+        curses.init_pair(40 + i, col, -1)
